@@ -1,4 +1,4 @@
-"""python3 -m cloudgpu COMMAND: status (read only), instances (the cloud account: list, status, snapshot read; power, create, release only with --yes), price, bench (a paid take), bundle (what to copy onto a box)."""
+"""python3 -m cloudgpu COMMAND: status (read only), hold / release (a person's hold on a box), instances (the cloud account: list, status, snapshot read; power, create, release only with --yes), price, bench (a paid take), bundle (what to copy onto a box)."""
 
 from __future__ import annotations
 
@@ -99,6 +99,13 @@ def main(argv: list[str] | None = None) -> int:
     q = isub.add_parser("create")
     q.add_argument("--spec", required=True, help="a JSON file of the vendor's create request, or - for stdin")
     q.add_argument("--yes", action="store_true")
+    ho = sub.add_parser("hold", help="hold a box for a time so no take starts on it (Pool.take waits or uses another box); ends by itself")
+    ho.add_argument("box", help="the box's name in CLOUDGPU_POOL, or default for a pool of one")
+    ho.add_argument("--minutes", type=float, required=True)
+    ho.add_argument("--who", required=True, help="who holds it, so the next person knows whom to ask")
+    ho.add_argument("--why", default="")
+    rl = sub.add_parser("release", help="end a hold now")
+    rl.add_argument("box")
     p = sub.add_parser("price", help="price rows from the recorded runs")
     p.add_argument("--box")
     p.add_argument("--runs")
@@ -122,6 +129,23 @@ def main(argv: list[str] | None = None) -> int:
                 return 2
         print(json.dumps(status(env, a.env_file), ensure_ascii=False))
         return 0
+    if a.cmd in ("hold", "release"):
+        from . import hold
+        from .errors import CloudGpuError
+        try:
+            sd = hold.state_dir()
+            if a.cmd == "release":
+                print(json.dumps({"released": hold.release(sd, a.box), "box": hold.box_key(a.box)}))
+            else:
+                h = hold.place(sd, a.box, a.minutes, a.who, a.why)
+                print(json.dumps({**h, "until_local": hold.clock(h["until"]), "next": [f"python3 -m cloudgpu release {h['box']} when you are done; it ends by itself at {hold.clock(h['until'])}"]}, ensure_ascii=False))
+            return 0
+        except CloudGpuError as e:
+            print(json.dumps({"error": e.message, "kind": e.kind, "next": e.next}, ensure_ascii=False))
+            return 2
+        except OSError as e:
+            print(json.dumps({"error": f"cannot write the state directory: {e.strerror}"}))
+            return 2
     if a.cmd == "price":
         from . import price
         obs = price.rows(price.read_runs(a.runs or price.RUNS), a.box, provider=a.provider)

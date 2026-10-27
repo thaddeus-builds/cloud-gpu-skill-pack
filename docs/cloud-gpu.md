@@ -139,7 +139,17 @@ A hold is one small file per box in `CLOUDGPU_STATE_DIR` (default `~/.cloudgpu/h
 else's active hold is not replaced, your own is extended). `Pool.take` counts a held box as busy and uses another; when every box it may use is held (a pool of one, or a take sent earlier that must
 return to its box) it waits, saying `waiting for the hold on BOX by NAME until HH:MM` once on stderr (or through `Pool(on_wait=fn)`), and goes when the hold ends. `Pool.power_off_if_idle` leaves a held
 box on. `python3 -m cloudgpu status` lists the active holds. **Limit:** a hold governs callers that go through `Pool`; someone who talks to ComfyUI directly is not stopped, and a hold on a box
-does not stop a take already running on it. A queue across processes is not here yet (issue 1, part 2; across hosts: issue 2).
+does not stop a take already running on it. 
+
+### A line for the takes of one machine (0.5.0)
+
+Two processes (two jobs, or a job and a person's run) that both see a free box no longer both send. Every take through `Pool.take` takes a **ticket** in `<CLOUDGPU_STATE_DIR>/turns/` and goes
+when it is the oldest waiting take that may use a box that is free (nothing running on it), not held, and comes up; a take pinned to one box (a result to fetch) waits in the line for that box only.
+A ticket is alive while its owner holds an `flock` on it, so a take that dies, however it dies, leaves no stale ticket and never blocks the line. A take that waits says so once
+(`waiting for its turn: take-3 (pid 4121) is running on a`), and `python3 -m cloudgpu status` lists the line (`queue`: state, box, pid, take folder, since) and adds a line to `next` for each.
+**Limits:** the line is per machine and per state directory: callers on different machines need the box to keep the line (issue 2), and two pools of different physical boxes that share a
+state directory and box names would wait on each other (give each set its own `CLOUDGPU_STATE_DIR`). Without `fcntl` (Windows) or a state directory that cannot be written there is no line and a take
+goes as in 0.4.
 
 ## Cloud vendors and power
 

@@ -7,7 +7,7 @@ from __future__ import annotations
 import time
 from collections.abc import Mapping
 
-from . import config, hold
+from . import config, hold, turns
 from .box import Box
 from .errors import CloudGpuError
 from .power import PASS_BILLING
@@ -76,6 +76,13 @@ def status(env: Mapping | None = None, envfile: str | None = None) -> dict:
         holds = hold.active(hold.state_dir(env))
     except OSError:
         holds = []
+    try:
+        line = turns.tickets(hold.state_dir(env), clean=False)
+    except OSError:
+        line = []
+    out["queue"] = [{k: t[k] for k in ("state", "box", "pid", "label", "since")} for t in line]
+    for t in line:
+        nxt.append(turns.describe(t) + " (a take of this machine)")
     out["holds"] = [{**h, "until_local": hold.clock(h["until"])} for h in holds]
     for h in holds:
         nxt.append(f"{h['box']} is held by {h['who']} until {hold.clock(h['until'])}" + (f" ({h['why']})" if h["why"] else "") + ": takes through the Pool wait for it")

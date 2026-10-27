@@ -1,5 +1,5 @@
 """Where a box stands, read only: the settings (names, set or unset), the box's /health, the power backend's account view. Sends no take, powers
-nothing on or off, writes nothing, costs nothing, prints no value of a setting. `ready` is true when a take could go to the box now; `next` says
+nothing on or off, writes nothing, costs nothing, lists the active holds, prints no value of a setting. `ready` is true when a take could go to the box now; `next` says
 what a person must do otherwise, one line each. A consumer adds its own checks (prices, a project's switch) to `next`."""
 
 from __future__ import annotations
@@ -7,7 +7,7 @@ from __future__ import annotations
 import time
 from collections.abc import Mapping
 
-from . import config
+from . import config, hold
 from .box import Box
 from .errors import CloudGpuError
 from .power import PASS_BILLING
@@ -72,6 +72,13 @@ def status(env: Mapping | None = None, envfile: str | None = None) -> dict:
                    "(docs/cloud-gpu.md, 'Power'), or CLOUDGPU_POWER=none when it is always on")
     if not box.get("BOX"):
         nxt.append("set CLOUDGPU_BOX to this box's name (rtx4090, rtx-pro6000, ...): prices are per box")
+    try:
+        holds = hold.active(hold.state_dir(env))
+    except OSError:
+        holds = []
+    out["holds"] = [{**h, "until_local": hold.clock(h["until"])} for h in holds]
+    for h in holds:
+        nxt.append(f"{h['box']} is held by {h['who']} until {hold.clock(h['until'])}" + (f" ({h['why']})" if h["why"] else "") + ": takes through the Pool wait for it")
     out["ready"] = bool(reach_ok and health and health.get("comfy"))
     out["next"] = nxt
     out["warnings"] = warnings

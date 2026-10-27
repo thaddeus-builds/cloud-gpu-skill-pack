@@ -126,6 +126,21 @@ A take waits for the first box in the list that is not making another take (a bo
 minute; every box down with none busy raises the last box's `CloudGpuError` instead of waiting for ever. The choice is written to the take's folder, and a take the caller says was sent
 earlier runs on the box that holds it and on no other: only that box can give its result back. Threads of one process share one pool, so with two boxes two takes run at once.
 
+### A person's hold on a box (0.4.0)
+
+A person who needs a box for an hour (a test, a manual run) says so, and takes through the `Pool` stay off it:
+
+```
+python3 -m cloudgpu hold BOX --minutes 60 --who NAME --why "manual test"     # BOX: the name in CLOUDGPU_POOL, or default for a pool of one
+python3 -m cloudgpu release BOX
+```
+
+A hold is one small file per box in `CLOUDGPU_STATE_DIR` (default `~/.cloudgpu/holds/`), so it works across processes and restarts and **ends by itself at its time** (at most 480 minutes; someone
+else's active hold is not replaced, your own is extended). `Pool.take` counts a held box as busy and uses another; when every box it may use is held (a pool of one, or a take sent earlier that must
+return to its box) it waits, saying `waiting for the hold on BOX by NAME until HH:MM` once on stderr (or through `Pool(on_wait=fn)`), and goes when the hold ends. `Pool.power_off_if_idle` leaves a held
+box on. `python3 -m cloudgpu status` lists the active holds. **Limit:** a hold governs callers that go through `Pool`; someone who talks to ComfyUI directly is not stopped, and a hold on a box
+does not stop a take already running on it. A queue across processes is not here yet (issue 1, part 2; across hosts: issue 2).
+
 ## Cloud vendors and power
 
 A **vendor** (`cloudgpu/vendors/`, one module each) is the cloud account's own API behind one small interface (`class Vendor`): `list`/`all`, `get`, `status`, `snapshot`,

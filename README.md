@@ -6,7 +6,7 @@ A box is a rented GPU with ComfyUI and the weights on it plus a small token-chec
 measured runs. Stdlib only, Python 3.9+.
 
 ```
-cloudgpu/           the package: Box (reach, tunnel, power), Pool (boxes in order of preference), vendors/ (the cloud accounts' APIs: autodl built in), power backends, the adapter (runs on the box), detect_models.py, price, status, bench
+cloudgpu/           the package: Box (reach, tunnel, power), Pool (boxes in order of preference, a person's hold on a box), vendors/ (the cloud accounts' APIs: autodl built in), power backends, the adapter (runs on the box), detect_models.py, price, status, bench
 cloudgpu/onbox/       install.sh, tunnel.sh, the two verified model presets
 cloudgpu/data/      runs.jsonl: the takes measured on a 4090 48G and an RTX PRO 6000
 docs/cloud-gpu.md   what it costs, how to set up a box, the settings, the calls, safety
@@ -17,6 +17,7 @@ tests/              python3 tests/run.py (offline: a fake ComfyUI stands in for 
 ```
 python3 -m cloudgpu status          # where the box stands, read only
 python3 -m cloudgpu instances list  # the cloud account (autodl): list, status, snapshot; power, create, release only with --yes
+python3 -m cloudgpu hold BOX --minutes 60 --who NAME   # keep takes off a box for a while (release BOX ends it)
 python3 -m cloudgpu bundle          # cloudgpu-box.tgz: what to copy onto a box
 python3 -m cloudgpu price --box rtx4090 --format tsv
 ```

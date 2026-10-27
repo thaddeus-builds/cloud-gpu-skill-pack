@@ -1,12 +1,14 @@
 """cloudgpu.pool: boxes in order of preference. A take goes to the first box that is free and comes up; a box that fails to come up is tried again after a pause; every box
 down with none busy is an error, not a wait; a take sent earlier stays on the box that holds it; a pool of one is just its box. Fake boxes, no network."""
 
+import tempfile
 import threading
 import time
 from pathlib import Path
 
 import _t
 
+from cloudgpu import hold
 from cloudgpu.errors import CloudGpuError
 from cloudgpu.pool import PIN_FILE, Pool, boxes_from
 
@@ -26,6 +28,7 @@ class FakeBox:
 
 def pool_of(*ups, **kw):
     boxes = [(n, FakeBox(up=u)) for n, u in zip("ab", ups)]
+    kw.setdefault("state_dir", tempfile.mkdtemp(prefix="cloudgpu-state-"))      # never the real ~/.cloudgpu
     return Pool(boxes, poll=0.01, **kw), boxes
 
 
@@ -105,6 +108,91 @@ def test_the_pool_is_read_from_the_environment_and_one_box_is_a_pool_of_one():
     for bad in ("a,a", "bad name", "a,,b,a"):
         with _t.raises("key_missing"):
             boxes_from({"CLOUDGPU_POOL": bad}, FakeBox)
+
+
+def test_a_held_box_is_busy_and_another_box_takes_the_take():
+    with _t.tmpdir() as d:
+        pool, boxes = pool_of(True, True)
+        hold.place(pool._state_dir, "a", 30, "pat", "manual test")
+        with pool.take(Path(d) / "t1") as box:
+            assert box is boxes[1][1] and boxes[0][1].ups == 0, "a is held: it is not even brought up"
+        hold.release(pool._state_dir, "a")
+        with pool.take(Path(d) / "t2") as box:
+            assert box is boxes[0][1]
+
+
+def test_when_every_box_is_held_the_take_waits_says_so_once_and_goes_when_the_hold_ends():
+    with _t.tmpdir() as d:
+        said = []
+        now = [1000.0]
+        pool, boxes = pool_of(True, True, now=lambda: now[0], on_wait=said.append)
+        pool._sleep = lambda s: now.__setitem__(0, now[0] + 60)                  # each wait of the pool is a minute of the wall clock
+        hold.place(pool._state_dir, "a", 3, "pat", now=now[0])
+        hold.place(pool._state_dir, "b", 10, "sam", now=now[0])
+        with pool.take(Path(d) / "t1") as box:
+            assert box is boxes[0][1] and now[0] >= 1180, "a's hold ended first and a took it"
+        assert len(said) == 1 and "waiting for the hold on a by pat until" in said[0], said
+
+
+def test_a_pool_of_one_a_pinned_take_and_a_held_only_box_wait_too_and_no_hold_is_no_wait():
+    with _t.tmpdir() as d:
+        now = [1000.0]
+        one = Pool([("", FakeBox())], poll=0.01, state_dir=tempfile.mkdtemp(), now=lambda: now[0], on_wait=lambda m: None)
+        one._sleep = lambda s: now.__setitem__(0, now[0] + 60)
+        hold.place(one._state_dir, "", 2, "pat", now=now[0])
+        with one.take(Path(d) / "x") as box:
+            assert box is one.box and now[0] >= 1120
+        pool, boxes = pool_of(True, True, now=lambda: now[0], on_wait=lambda m: None)
+        pool._sleep = lambda s: now.__setitem__(0, now[0] + 60)
+        out = Path(d) / "t"
+        out.mkdir()
+        (out / PIN_FILE).write_text("b")
+        t0 = now[0]
+        hold.place(pool._state_dir, "b", 2, "pat", now=t0)
+        with pool.take(out, sent=lambda o: True) as box:
+            assert box is boxes[1][1] and now[0] >= t0 + 120, "the box that holds the sent take is held: no other box can serve it, so it waits"
+
+
+def test_an_all_down_pool_still_raises_and_a_held_box_is_not_powered_off():
+    with _t.tmpdir() as d:
+        pool, boxes = pool_of(False, False)
+        with _t.raises("unreachable"):
+            with pool.take(Path(d) / "t"):
+                pass
+        calls = []
+        pool, boxes = pool_of(True, True)
+        for n, b in boxes:
+            b.power_off_if_idle = (lambda n=n: calls.append(n) or True)
+        hold.place(pool._state_dir, "a", 30, "pat")
+        assert pool.power_off_if_idle() is True and calls == ["b"]
+
+
+def test_a_hold_file_is_atomic_expires_by_itself_is_capped_and_is_not_taken_over():
+    with _t.tmpdir() as sd:
+        h = hold.place(sd, "A", 60, "pat", "x" * 500, now=1000.0)
+        assert h["until"] == 4600.0 and len(h["why"]) == hold.TEXT_MAX and hold.get(sd, "a", 1500.0)["who"] == "pat"
+        assert hold.get(sd, "a", 4600.0) is None and not (Path(sd) / "holds" / "a.json").exists(), "ended: gone and the file removed"
+        hold.place(sd, "a", 60, "pat", now=1000.0)
+        with _t.raises("key_missing") as c:                                       # someone else's hold is not replaced
+            hold.place(sd, "a", 10, "sam", now=1100.0)
+        assert "pat" in c.err.message
+        assert hold.place(sd, "a", 90, "pat", now=1100.0)["until"] == 6500.0, "your own hold is extended"
+        for bad in (0, -5, hold.MAX_MINUTES + 1):
+            with _t.raises("key_missing"):
+                hold.place(sd, "b", bad, "pat")
+        with _t.raises("key_missing"):
+            hold.place(sd, "b", 5, " ")
+        with _t.raises("key_missing"):
+            hold.place(sd, "../x", 5, "pat")
+        (Path(sd) / "holds" / "c.json").write_text("not json")
+        assert hold.get(sd, "c") is None and not (Path(sd) / "holds" / "c.json").exists(), "a file that is no hold never blocks a box"
+        assert [x["box"] for x in hold.active(sd, 1200.0)] == ["a"]
+        assert hold.release(sd, "a") is True and hold.release(sd, "a") is False
+
+
+def test_the_state_directory_comes_from_the_setting():
+    assert hold.state_dir({"CLOUDGPU_STATE_DIR": "/x/y"}) == Path("/x/y") and hold.state_dir({}) == Path.home() / ".cloudgpu"
+    assert Pool.from_env({"CLOUDGPU_STATE_DIR": "/x/y"})._state_dir == Path("/x/y")
 
 
 if __name__ == "__main__":

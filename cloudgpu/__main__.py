@@ -10,7 +10,7 @@ import tarfile
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-BUNDLE_FILES = {"adapter.py": HERE / "adapter.py", "detect_models.py": HERE / "detect_models.py", "install.sh": HERE / "onbox" / "install.sh",
+BUNDLE_FILES = {"adapter.py": HERE / "adapter.py", "tts_worker.py": HERE / "onbox" / "tts_worker.py", "detect_models.py": HERE / "detect_models.py", "install.sh": HERE / "onbox" / "install.sh",
                 "tunnel.sh": HERE / "onbox" / "tunnel.sh", "models.4090.json": HERE / "onbox" / "models.4090.json",
                 "models.pro6000.json": HERE / "onbox" / "models.pro6000.json"}
 

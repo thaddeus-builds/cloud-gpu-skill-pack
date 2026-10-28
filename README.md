@@ -1,12 +1,12 @@
 # cloud-gpu-skill-pack
 
-Run ComfyUI workflows (MiniMax-H3 video first) on a GPU you rent from **any vendor that gives SSH**, from any project, with the same few calls as autodl.art's workflow API.
+Run ComfyUI workflows (MiniMax-H3 video first, and the IndexTTS2 voice) on a GPU you rent from **any vendor that gives SSH**, from any project, with the same few calls as autodl.art's workflow API.
 A box is a rented GPU with ComfyUI and the weights on it plus a small token-checked adapter; this package sets it up, reaches it (an SSH tunnel by key, no password), powers it
 (the cloud account's API as a vendor: autodl built in and the default, `none`, or the next cloud you buy as one module), finds the model files by exact name in any image layout, and prices a second of video from
 measured runs. Stdlib only, Python 3.9+.
 
 ```
-cloudgpu/           the package: Box (reach, tunnel, power), Pool (boxes in order of preference, a person's hold on a box, a line for the takes of one machine), vendors/ (the cloud accounts' APIs: autodl built in), power backends, the adapter (runs on the box), detect_models.py, price, status, bench
+cloudgpu/           the package: Box (reach, tunnel, power), Pool (boxes in order of preference, a person's hold on a box, a line for the takes of one machine), vendors/ (the cloud accounts' APIs: autodl built in), power backends, the adapter (runs on the box), the voice (IndexTTS2) it can serve, detect_models.py, price, status, bench
 cloudgpu/onbox/       install.sh, tunnel.sh, the two verified model presets
 cloudgpu/data/      runs.jsonl: the takes measured on a 4090 48G and an RTX PRO 6000
 docs/cloud-gpu.md   what it costs, how to set up a box, the settings, the calls, safety

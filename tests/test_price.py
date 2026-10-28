@@ -51,7 +51,7 @@ def test_the_bundle_holds_exactly_what_a_box_needs():
         assert r.returncode == 0, r.stderr
         with tarfile.open(out) as t:
             names = sorted(t.getnames())
-            assert names == sorted(["adapter.py", "detect_models.py", "install.sh", "tunnel.sh", "models.4090.json", "models.pro6000.json"]), names
+            assert names == sorted(["adapter.py", "tts_worker.py", "detect_models.py", "install.sh", "tunnel.sh", "models.4090.json", "models.pro6000.json"]), names
             assert t.getmember("install.sh").mode & 0o111 and not t.getmember("adapter.py").mode & 0o111
 
 

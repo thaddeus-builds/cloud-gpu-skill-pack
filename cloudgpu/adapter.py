@@ -7,17 +7,17 @@ calls a client of that API already makes, so a client needs a base URL and a tok
     GET  /api/v1/comfyui/comfyui_workflow/result/{task_id}  -> {"code":"Success","data":{"status":QUEUED|RUNNING|SUCCESS|FAILED,
                                                                 "results":[{"url":...,"type":"video","file_type":"mp4"}]}}
     GET  /health[?nonce=X]                                  -> {"ok":bool,"comfy":bool,"busy":N,"worker":"alive"|"dead","card":"NVIDIA ..., 49140 MiB"|"unknown",
-                                                                "memory_mib":49140|null [,"proof":HMAC-SHA256(token, X) hex]}   (no token; `ok` is false when the worker thread is
+                                                                "memory_mib":49140|null,"voice":bool [,"proof":HMAC-SHA256(token, X) hex]}   (no token; `ok` is false when the worker thread is
                                                                 dead; N = takes accepted and not yet over, plus finished ones not yet collected until
                                                                 GRACE_S after they finished: a caller shuts the box down only at 0. `card` is the GPU the
                                                                 box runs on, so a caller can check the box it declared; `memory_mib` is the first GPU's
-                                                                memory as a number, null when unknown. `proof` lets a client that holds the token tell
+                                                                memory as a number, null when unknown; `voice` is true when indextts2-v1 is installed. `proof` lets a client that holds the token tell
                                                                 this adapter from another process holding the tunnel's port: it is answered only when the
                                                                 bind address is loopback, for a nonce of 16 to 64 lowercase hex characters, at most
                                                                 PROOF_PER_MIN a minute; on a widened bind there is no proof (it would be an offline
                                                                 guessing oracle for the token) and a client then refuses an http base: reach such a box
                                                                 by its https address)
-    GET  /files/<random>.mp4                                -> the finished video (the URL is the secret; valid FILE_TTL_S, after which the task
+    GET  /files/<random>.mp4|.wav                           -> the finished video or voice (the URL is the secret; valid FILE_TTL_S, after which the task
                                                                 reads FAILED "result expired")
 
     Authorization: <CLOUDGPU_TOKEN>    the raw token, as autodl's own header (no "Bearer"); compared in constant time.
@@ -28,18 +28,21 @@ Workflows (the names autodl publishes, so a project's avatar.workflow keeps work
     minimax_h3_lightx2v               prompt + first_frame + last_frame + duration + resolution (+ seed)
                                       Mode A: the FL2VA model speaks the prompt's line itself
     resolution: "480p竖" 480x864 | "768p竖" 768x1344. 1080p is refused: it was never run on this card.
+    indextts2-v1                      prompt_text + prompt_simple (the voice sample) + emo_control_method (+ emo_happy .. emo_calm, emo_ref_audio, emo_alpha, emo_random)
+                                      the voice: IndexTTS2 run by tts_worker.py in its own Python environment (--tts-python, --tts-dir); the result is a wav
+                                      (type "audio", file_type "wav"). Without a voice installed the box answers 400 and /health says "voice": false.
 Inputs are http(s) URLs or data: URIs. A URL that points at this machine or a private address is refused (this box is
 not a proxy into its own network). Both graphs are ComfyUI's own open templates (video_minimax_h3_r2v, video_minimax_h3_i2v),
 rebuilt as API graphs here; the box's other H3 workflows carry their author's lock and are not used.
 
-One GPU runs one take at a time (ComfyUI queues), so tasks are served in order by one worker. A task found QUEUED or RUNNING
+One GPU runs one take at a time (ComfyUI queues), so tasks, a voice included, are served in order by one worker. A task found QUEUED or RUNNING
 after a restart is FAILED ("restarted"), never silently re-run, its input files are deleted, and ComfyUI is told to interrupt and clear its queue so the
 orphan job does not run on (and cost GPU time) for nobody. Task files older than TASK_TTL_S are deleted at start and every MAINTAIN_EVERY_S.
 
 Binds 127.0.0.1 (the SSH tunnel needs only that); CLOUDGPU_BIND or --bind widens it (0.0.0.0 for a vendor's public port: then ComfyUI must not be on one).
 A URL input is resolved once, every address must be global (not private, loopback, link-local, 100.64.0.0/10, reserved), and the connection goes to that address.
 
-    CLOUDGPU_TOKEN=... python3 adapter.py [--port 6009] [--bind 127.0.0.1] [--comfy http://127.0.0.1:6006] [--comfy-root ~/ComfyUI] [--state ~/h3host] [--models FILE]
+    CLOUDGPU_TOKEN=... python3 adapter.py [--port 6009] [--bind 127.0.0.1] [--comfy http://127.0.0.1:6006] [--comfy-root ~/ComfyUI] [--state ~/h3host] [--models FILE] [--tts-python PY --tts-dir DIR]
 """
 
 from __future__ import annotations
@@ -98,7 +101,15 @@ MODELS = {
     "vae_video": "MiniMax/minimax_h3_video_vae_fp16.safetensors",
     "vae_audio": "MiniMax/minimax_h3_audio_vae_fp32.safetensors",
 }
-WORKFLOWS = {"minimax_h3_image_audio_to_video": "ref", "minimax_h3_lightx2v": "fl"}
+TTS_WORKFLOW = "indextts2-v1"
+WORKFLOWS = {"minimax_h3_image_audio_to_video": "ref", "minimax_h3_lightx2v": "fl", TTS_WORKFLOW: "tts"}
+TTS_MAX_CHARS = 2000
+TTS_TIMEOUT_S = 900                # the model is loaded for each voice (its VRAM is given back after), so this includes the load
+TTS_MAGIC = b"RIFF"
+EMOTIONS = ("happy", "angry", "sad", "afraid", "disgusted", "melancholic", "surprised", "calm")      # IndexTTS2's vector order
+EMO_METHODS = {"与音色参考音频相同": "same", "使用情感参考音频": "audio", "使用情感向量控制": "vector"}     # the hosted workflow's words; the text-described one is not served
+EMO_TEXT_METHOD = "使用情感描述文本控制"
+CONTENT_TYPES = {"mp4": "video/mp4", "wav": "audio/wav"}
 DEFAULT_REF_PROMPT = ("The person from <Picture 1> faces the camera and talks naturally to the viewer, soft light, vertical phone "
                       "video. Use <Picture 1> as reference frame and <Audio 1> exactly as it is. No captions, subtitles, titles, "
                       "logos, watermarks or any text appears anywhere in the frame; the picture stays as clean as <Picture 1>.")
@@ -259,6 +270,8 @@ def plan(workflow: str, body: dict) -> dict:
     kind = WORKFLOWS.get(workflow)
     if kind is None:
         raise Refused(f"unknown workflow {workflow!r}; this box serves {', '.join(sorted(WORKFLOWS))}")
+    if kind == "tts":
+        return plan_voice(body)
     res = body.get("resolution", "768p竖")
     if res not in RESOLUTIONS:
         raise Refused(f"resolution {res!r} is not served here ({', '.join(RESOLUTIONS)})")
@@ -286,10 +299,47 @@ def plan(workflow: str, body: dict) -> dict:
     return {"kind": kind, "w": w, "h": h, "seconds": secs, "seed": seed, "prompt": str(prompt)}
 
 
+def _unit(v, what: str) -> float:
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        raise Refused(f"{what} must be a number from 0 to 1") from None
+    if not 0.0 <= f <= 1.0:            # also False for nan
+        raise Refused(f"{what} must be a number from 0 to 1")
+    return f
+
+
+def plan_voice(body: dict) -> dict:
+    """The voice's parameters (no side effects): the line, the emotion mode and its numbers, or Refused. The call shape is the hosted workflow's."""
+    text = body.get("prompt_text")
+    if not isinstance(text, str) or not text.strip():
+        raise Refused("prompt_text is required (the line to speak)")
+    if len(text) > TTS_MAX_CHARS:
+        raise Refused(f"prompt_text is over {TTS_MAX_CHARS} characters: split the line")
+    if not body.get("prompt_simple"):
+        raise Refused("prompt_simple is required (the voice sample to clone)")
+    method = body.get("emo_control_method") or "与音色参考音频相同"
+    if method == EMO_TEXT_METHOD:
+        raise Refused("an emotion described by text is not served on this box; use the emotion vector (emo_happy ... emo_calm) or emo_ref_audio")
+    mode = EMO_METHODS.get(method)
+    if mode is None:
+        raise Refused(f"emo_control_method {method!r} is not served here ({', '.join(EMO_METHODS)})")
+    p = {"kind": "tts", "text": text, "emo": mode, "vector": None, "alpha": None, "random": bool(body.get("emo_random", False))}
+    if body.get("emo_alpha") is not None:
+        p["alpha"] = _unit(body["emo_alpha"], "emo_alpha")
+    if mode == "vector":
+        p["vector"] = [_unit(body.get("emo_" + e, 0), "emo_" + e) for e in EMOTIONS]
+        if not any(p["vector"]):
+            raise Refused("emo_control_method asks for the emotion vector but every emo_<emotion> is 0")
+    if mode == "audio" and not body.get("emo_ref_audio"):
+        raise Refused("emo_ref_audio is required for the emotion-from-audio method")
+    return p
+
+
 # ---- the server ------------------------------------------------------------------------------------------------------
 
 class Host:
-    def __init__(self, token: str, comfy: str, state: Path, comfy_root: Path, public_base: str = "", bind: str = "127.0.0.1"):
+    def __init__(self, token: str, comfy: str, state: Path, comfy_root: Path, public_base: str = "", bind: str = "127.0.0.1", tts: dict | None = None):
         if not token:
             raise ValueError("the token is empty: the adapter would answer anyone")
         self.token, self.comfy, self.state, self.root = token, comfy.rstrip("/"), state, comfy_root
@@ -297,6 +347,7 @@ class Host:
         self.tasks_dir.mkdir(parents=True, exist_ok=True)
         self.out_dir.mkdir(parents=True, exist_ok=True)
         self.public_base = public_base.rstrip("/")
+        self.tts = tts                      # {"python", "dir", "worker"} when a voice is installed, else None
         self.q: queue.Queue = queue.Queue()
         self.lock = threading.Lock()
         self.n_active = 0                   # takes accepted (even while their inputs are still being fetched) and not over: /health reads this, not the files
@@ -396,6 +447,8 @@ class Host:
 
     def submit(self, workflow: str, body: dict) -> str:
         p = plan(workflow, body)
+        if p["kind"] == "tts" and not self.tts:
+            raise Refused("this box has no voice installed (IndexTTS2: start the adapter with --tts-python and --tts-dir, see docs/cloud-gpu.md)")
         with self.lock:
             self.n_active += 1              # busy from here: fetching the inputs below can take a minute, and a power-off must not fall into it
         tid = "h3-" + uuid.uuid4().hex[:20]
@@ -405,7 +458,11 @@ class Host:
             # fetch before queueing: a bad input is the caller's 400 now, not a failed take later
             inp = self.root / "input"
             inp.mkdir(parents=True, exist_ok=True)
-            if p["kind"] == "ref":
+            if p["kind"] == "tts":
+                files.append(fetch(body["prompt_simple"], inp, ("audio",), "prompt_simple"))
+                if p["emo"] == "audio":
+                    files.append(fetch(body["emo_ref_audio"], inp, ("audio",), "emo_ref_audio"))
+            elif p["kind"] == "ref":
                 files.append(fetch(body["ref_image_0"], inp, ("image",), "ref_image_0"))
                 files.append(fetch(body["ref_audio_0"], inp, ("audio",), "ref_audio_0"))
             else:
@@ -437,19 +494,20 @@ class Host:
             return None
         d = {"status": t["status"]}
         if t["status"] == "SUCCESS":
-            if self.file(t.get("file_key") or "") is None:       # the video was swept (FILE_TTL_S) while the record lives on (TASK_TTL_S)
+            if self.file(t.get("file_key") or "", t.get("file_ext", "mp4")) is None:       # the video was swept (FILE_TTL_S) while the record lives on (TASK_TTL_S)
                 self.collected(tid=tid)
                 return {"status": "FAILED", "error": "result expired: the video was deleted from the box; run the take again"}
-            d["results"] = [{"url": f"{self.public_base}/files/{t['file_key']}.mp4", "type": "video", "file_type": "mp4"}]
+            ext = t.get("file_ext", "mp4")
+            d["results"] = [{"url": f"{self.public_base}/files/{t['file_key']}.{ext}", "type": "audio" if ext == "wav" else "video", "file_type": ext}]
         if t["status"] == "FAILED":
             d["error"] = t.get("error", "")
             self.collected(tid=tid)
         return d
 
-    def file(self, key: str):
-        if len(key) != 32 or not key.isalnum():
+    def file(self, key: str, ext: str = "mp4"):
+        if len(key) != 32 or not key.isalnum() or ext not in CONTENT_TYPES:
             return None
-        p = self.out_dir / f"{key}.mp4"
+        p = self.out_dir / f"{key}.{ext}"
         return p if p.is_file() and time.time() - p.stat().st_mtime < FILE_TTL_S else None
 
     def card(self) -> str:
@@ -474,7 +532,7 @@ class Host:
         alive = wt is not None and wt.is_alive()
         card = self.card()
         d = {"ok": alive, "comfy": self.comfy_up(), "busy": self.busy(), "worker": "alive" if alive else "dead", "card": card,
-             "memory_mib": self._mem_mib if card != "unknown" else None}
+             "memory_mib": self._mem_mib if card != "unknown" else None, "voice": bool(self.tts)}
         if nonce and self.proof_ok and NONCE.fullmatch(nonce) and self._proof_allowed():
             d["proof"] = hmac.new(self.token.encode(), nonce.encode(), "sha256").hexdigest()
         return d
@@ -578,6 +636,8 @@ class Host:
         self.keep(t)
 
     def run(self, t: dict):
+        if t["plan"]["kind"] == "tts":
+            return self.run_tts(t)
         deadline = time.time() + COMFY_WAIT_S
         while not self.comfy_up():
             if time.time() > deadline:
@@ -630,9 +690,53 @@ class Host:
         t["file_key"] = key
         self.sweep()
 
+    def run_tts(self, t: dict):
+        """The voice: tts_worker.py in the IndexTTS2 environment writes one wav. ComfyUI is first asked to give its GPU memory back (the H3 models stay resident
+        otherwise and the voice model may not fit next to them); the next video take loads them again."""
+        p, files = t["plan"], t["inputs"]
+        self.free_comfy()
+        key = secrets.token_hex(16)
+        dst = self.out_dir / f"{key}.wav"
+        job = {"dir": str(self.tts["dir"]), "text": p["text"], "spk": str(self.root / "input" / files[0]), "out": str(dst), "emo": p["emo"], "vector": p["vector"],
+               "alpha": p["alpha"], "random": p["random"], "emo_audio": str(self.root / "input" / files[1]) if p["emo"] == "audio" else None}
+        jobfile = self.state / f"voice-{t['id']}.job"
+        env = {k: v for k, v in os.environ.items() if k not in ("CLOUDGPU_TOKEN", "H3HOST_TOKEN")}       # the voice process has no use for the token
+        try:
+            fd = os.open(jobfile, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(job, f, ensure_ascii=False)
+            try:
+                r = subprocess.run([str(self.tts["python"]), str(self.tts["worker"]), str(jobfile)], capture_output=True, text=True, timeout=TTS_TIMEOUT_S,
+                                   env=env, cwd=str(self.state))
+            except subprocess.TimeoutExpired:
+                raise RuntimeError(f"the voice timed out after {TTS_TIMEOUT_S}s") from None
+            if r.returncode != 0:
+                raise RuntimeError("the voice failed: " + (r.stderr.strip().splitlines() or ["no message"])[-1][-300:])
+            try:
+                with open(dst, "rb") as f:
+                    ok = f.read(4) == TTS_MAGIC and dst.stat().st_size > 44
+            except OSError:
+                ok = False
+            if not ok:
+                raise RuntimeError("the voice finished without a wav file")
+        except BaseException:
+            dst.unlink(missing_ok=True)
+            raise
+        finally:
+            jobfile.unlink(missing_ok=True)
+        t["file_key"], t["file_ext"] = key, "wav"
+        self.sweep()
+
+    def free_comfy(self):
+        """Best effort: ask ComfyUI to unload its models and free its memory (it may be down, or an older one without the call)."""
+        try:
+            self.comfy_json("/free", {"unload_models": True, "free_memory": True}, timeout=10)
+        except (urllib.error.URLError, OSError, ValueError):
+            pass
+
     def sweep(self):
         now = time.time()
-        for p in list(self.out_dir.glob("*.mp4")):
+        for p in list(self.out_dir.glob("*.mp4")) + list(self.out_dir.glob("*.wav")):
             try:
                 if now - p.stat().st_mtime > FILE_TTL_S:
                     p.unlink(missing_ok=True)
@@ -679,12 +783,13 @@ def handler(host: Host):
             if path == "/health":
                 nonce = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("nonce", [""])[0]
                 return self._send(200, host.health(nonce))
-            if path.startswith("/files/") and path.endswith(".mp4"):
-                p = host.file(path[len("/files/"):-4])
+            if path.startswith("/files/") and path.rsplit(".", 1)[-1] in CONTENT_TYPES:
+                ext = path.rsplit(".", 1)[-1]
+                p = host.file(path[len("/files/"):-(len(ext) + 1)], ext)
                 if p is None:
                     return self._send(404, {"code": "NotFound", "data": None, "msg": ""})
                 self.send_response(200)
-                self.send_header("Content-Type", "video/mp4")
+                self.send_header("Content-Type", CONTENT_TYPES[ext])
                 self.send_header("Content-Length", str(p.stat().st_size))
                 self.end_headers()
                 with open(p, "rb") as f:
@@ -740,6 +845,8 @@ def main():
     ap.add_argument("--comfy-root", default=os.path.expanduser("~/ComfyUI"))
     ap.add_argument("--state", default=os.path.expanduser("~/h3host"))
     ap.add_argument("--models", help="a JSON file of MODELS overrides (the keys at the top of this module)")
+    ap.add_argument("--tts-python", default=os.environ.get("CLOUDGPU_TTS_PYTHON", ""), help="the Python of the IndexTTS2 environment (CLOUDGPU_TTS_PYTHON); the voice is served only with --tts-dir too")
+    ap.add_argument("--tts-dir", default=os.environ.get("CLOUDGPU_TTS_DIR", ""), help="IndexTTS2's checkpoints folder, the one with config.yaml (CLOUDGPU_TTS_DIR)")
     ap.add_argument("--public-base", default=os.environ.get("CLOUDGPU_PUBLIC_BASE") or os.environ.get("H3HOST_PUBLIC_BASE", ""),
                     help="https://host:port the callers reach this server at; result URLs are built from it")
     a = ap.parse_args()
@@ -752,7 +859,9 @@ def main():
     token = (os.environ.get("CLOUDGPU_TOKEN") or os.environ.get("H3HOST_TOKEN") or "").strip()
     if len(token) < 24:
         raise SystemExit("set CLOUDGPU_TOKEN to a secret of at least 24 characters")
-    host = Host(token, a.comfy, Path(a.state), Path(a.comfy_root), a.public_base, a.bind)
+    worker = Path(__file__).resolve().with_name("tts_worker.py")
+    tts = {"python": a.tts_python, "dir": a.tts_dir, "worker": worker} if a.tts_python and a.tts_dir and worker.is_file() and (Path(a.tts_dir) / "config.yaml").is_file() else None
+    host = Host(token, a.comfy, Path(a.state), Path(a.comfy_root), a.public_base, a.bind, tts)
     host.start_worker()
     ThreadingHTTPServer((a.bind, a.port), handler(host)).serve_forever()
 

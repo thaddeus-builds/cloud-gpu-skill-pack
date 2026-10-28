@@ -8,6 +8,9 @@ image does not scale; this reads the ComfyUI models folders (following links: th
 variant is not picked. The text encoder depends on the card: the nvfp4 file needs a Blackwell GPU (compute capability 12 or more), every other
 card takes the int8 one; the capability is asked of nvidia-smi unless --compute-cap says it. Prints a JSON report ({models, missing,
 alternatives}); writes --out only when every key was found; exit 1 otherwise. Stdlib only.
+
+The voice (IndexTTS2) is optional and never makes a box "missing" something: the report's `tts` is {dir, python} when a checkpoints folder (config.yaml and s2mel.pth) and a Python that
+can import indextts.infer_v2 were found, else null; --tts-out FILE writes it as JSON only when both were found. CLOUDGPU_TTS_DIR and CLOUDGPU_TTS_PYTHON name them when the search does not.
 """
 
 from __future__ import annotations
@@ -81,6 +84,47 @@ def detect(comfy_root: Path, compute_cap: float) -> dict:
     return {"models": chosen, "missing": missing, "alternatives": {k: v for k, v in alts.items() if v}, "compute_cap": compute_cap}
 
 
+TTS_FILES = ("config.yaml", "s2mel.pth")          # a folder is IndexTTS2's checkpoints when it holds both (IndexTTS 1.x has no s2mel)
+TTS_ROOTS = ("index-tts", "IndexTTS2", "IndexTTS-2", "index-tts2")
+
+
+def find_tts_dir(comfy_root: Path, home: Path, env: dict) -> Path | None:
+    """The named folder (CLOUDGPU_TTS_DIR) if it holds the checkpoints, else the first folder with them under ComfyUI's models folder or a checkout in the home folder (depth 4, links followed)."""
+    named = env.get("CLOUDGPU_TTS_DIR")
+    if named:
+        d = Path(named).expanduser()
+        return d if all((d / f).is_file() for f in TTS_FILES) else None
+    for root in [comfy_root / "models"] + [home / n for n in TTS_ROOTS]:
+        base = len(root.parts)
+        for dirpath, dirs, files in os.walk(root, followlinks=True):
+            if len(Path(dirpath).parts) - base >= 4:
+                dirs[:] = []
+            if all(f in files for f in TTS_FILES):
+                return Path(dirpath)
+    return None
+
+
+def imports_indextts(python: str) -> bool:
+    try:
+        r = subprocess.run([python, "-c", "import indextts.infer_v2"], capture_output=True, timeout=120)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return r.returncode == 0
+
+
+def find_tts(comfy_root: Path, home: Path, env: dict, can_import=imports_indextts) -> dict | None:
+    """{dir, python} of an installed voice, or None. The Python is CLOUDGPU_TTS_PYTHON, else a virtual environment next to the checkout, else the ones on this box: the first that imports indextts.infer_v2."""
+    d = find_tts_dir(comfy_root, home, env)
+    if d is None:
+        return None
+    cands = [env.get("CLOUDGPU_TTS_PYTHON")] if env.get("CLOUDGPU_TTS_PYTHON") else \
+        [str(p / ".venv" / "bin" / "python") for p in (d.parent, d.parent.parent)] + [str(comfy_root / ".venv" / "bin" / "python"), sys.executable, "python3", "python"]
+    for c in cands:
+        if c and can_import(c):
+            return {"dir": str(d), "python": c}
+    return None
+
+
 def gpu_cap() -> float:
     try:
         out = subprocess.run(["nvidia-smi", "--query-gpu=compute_cap", "--format=csv,noheader"], capture_output=True, text=True, timeout=30).stdout
@@ -94,9 +138,17 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--comfy-root", default="/root/ComfyUI")
     ap.add_argument("--compute-cap", type=float)
     ap.add_argument("--out")
+    ap.add_argument("--tts-out", help="write the voice found ({dir, python}) here as JSON")
+    ap.add_argument("--tts-only", action="store_true", help="look for the voice only (no H3 models, no GPU query)")
     a = ap.parse_args(argv)
+    tts = find_tts(Path(a.comfy_root), Path.home(), dict(os.environ))
+    if a.tts_out and tts:
+        Path(a.tts_out).write_text(json.dumps(tts) + "\n")
+    if a.tts_only:
+        print(json.dumps({"tts": tts}, indent=1))
+        return 0
     cap = a.compute_cap if a.compute_cap is not None else gpu_cap()
-    rep = detect(Path(a.comfy_root), cap)
+    rep = {**detect(Path(a.comfy_root), cap), "tts": tts}
     if a.out and not rep["missing"]:
         Path(a.out).write_text(json.dumps(rep["models"], indent=1) + "\n")
     print(json.dumps(rep, indent=1))

@@ -4,6 +4,7 @@
 #   sh install.sh auto 6009 < token
 # The token (24+ characters) is read from stdin and written 0600; it is never an argument, so `ps` does not show it.
 # Variables: CLOUDGPU_DIR (default $HOME/h3host: the folder name the first boxes got; START_COMMAND in box.py is its start.sh), CLOUDGPU_COMFY_ROOT (default $HOME/ComfyUI), CLOUDGPU_PYTHON (default: the first python found),
+# CLOUDGPU_TTS_DIR / CLOUDGPU_TTS_PYTHON (IndexTTS2's checkpoints folder and the Python of its environment, when they are not found by themselves: the voice is optional),
 # CLOUDGPU_PUBLIC_BASE (https://host:port the callers reach it at, when the vendor exposes a port) and CLOUDGPU_BIND (default 127.0.0.1: all the SSH tunnel needs; 0.0.0.0 only for a
 # vendor's public port). start.sh does not restart an adapter that has a take running. A systemd unit is installed when the box runs
 # systemd, so the adapter starts at boot; a container without it relies on the vendor's power-on hook running $CLOUDGPU_DIR/start.sh.
@@ -25,6 +26,22 @@ if [ "$MODELS" = auto ]; then
 else
   cp "$HERE/$MODELS" "$D/models.json"
 fi
+# The voice (IndexTTS2) is optional: installed only when the bundle carries tts_worker.py and its checkpoints and a Python that imports it are found (or named by
+# CLOUDGPU_TTS_DIR and CLOUDGPU_TTS_PYTHON). Without it the adapter answers the voice workflow 400 and /health says "voice": false.
+TTSFLAGS=""
+if [ -f "$HERE/tts_worker.py" ] && [ -f "$HERE/detect_models.py" ]; then
+  cp "$HERE/tts_worker.py" "$D/tts_worker.py"
+  rm -f "$D/tts.json"
+  "$PY" "$HERE/detect_models.py" --comfy-root "$ROOT" --tts-only --tts-out "$D/tts.json" >/dev/null 2>&1 || true
+  if [ -f "$D/tts.json" ]; then
+    TTSDIR="$("$PY" -c 'import json,sys;print(json.load(open(sys.argv[1]))["dir"])' "$D/tts.json")"
+    TTSPY="$("$PY" -c 'import json,sys;print(json.load(open(sys.argv[1]))["python"])' "$D/tts.json")"
+    TTSFLAGS="--tts-python '$TTSPY' --tts-dir '$TTSDIR'"
+    echo "voice: IndexTTS2 found ($TTSDIR)"
+  else
+    echo "voice: IndexTTS2 not found on this box (optional; CLOUDGPU_TTS_DIR and CLOUDGPU_TTS_PYTHON name it)"
+  fi
+fi
 ( umask 077; cat > "$D/token" )
 [ "$(tr -d '\r\n' < "$D/token" | wc -c)" -ge 24 ] || { echo "the token is shorter than 24 characters" >&2; exit 1; }
 cat > "$D/start.sh" <<EOS
@@ -38,7 +55,7 @@ fi
 pkill -f "$D/server.py" 2>/dev/null || true
 cd "$D"
 S=""; command -v setsid >/dev/null 2>&1 && S=setsid
-CLOUDGPU_TOKEN="\$(cat "$D/token")" CLOUDGPU_PUBLIC_BASE="\${CLOUDGPU_PUBLIC_BASE:-${CLOUDGPU_PUBLIC_BASE:-}}" CLOUDGPU_BIND="\${CLOUDGPU_BIND:-${CLOUDGPU_BIND:-}}" \$S nohup "$PY" "$D/server.py" --port $PORT --comfy-root "$ROOT" --state "$D" --models "$D/models.json" > "$D/server.log" 2>&1 < /dev/null &
+CLOUDGPU_TOKEN="\$(cat "$D/token")" CLOUDGPU_PUBLIC_BASE="\${CLOUDGPU_PUBLIC_BASE:-${CLOUDGPU_PUBLIC_BASE:-}}" CLOUDGPU_BIND="\${CLOUDGPU_BIND:-${CLOUDGPU_BIND:-}}" \$S nohup "$PY" "$D/server.py" --port $PORT --comfy-root "$ROOT" --state "$D" --models "$D/models.json" $TTSFLAGS > "$D/server.log" 2>&1 < /dev/null &
 sleep 2; curl -s "127.0.0.1:$PORT/health"; echo
 EOS
 chmod 700 "$D/start.sh"

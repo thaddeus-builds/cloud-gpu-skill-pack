@@ -16,7 +16,8 @@ confirming a price in the project that uses it; running a take to "test" the box
    person must do (a setting, the tunnel, a pass that ended). Give the person those lines as they are.
 2. **A new box.** The person rents it and gives you its SSH line (not a password). `python3 -m cloudgpu bundle` makes what goes onto the box; the person (or you, when they
    have given you a key that already works) copies it, runs `sh install.sh auto 6009 < token-file`, and puts the public half of a restricted key in `authorized_keys` (docs, "Set up a box").
-   If `install.sh` reports missing model files, the image does not carry H3: say so, do not look for the files elsewhere.
+   If `install.sh` reports missing model files, the image does not carry H3: say so, do not look for the files elsewhere. The voice (IndexTTS2) is optional: `install.sh` says whether it found one and
+   `status` shows `box.voice`; a take that needs a voice on a box without one is refused (400), nothing is paid. Never install IndexTTS2 or download weights yourself: that is a person's step.
 3. **Reaching it.** By key: `CLOUDGPU_SSH_KEY` (chmod 600) and `CLOUDGPU_SSH`; the package opens the tunnel by itself. A vendor that exposes a port: `CLOUDGPU_BASE` and an adapter on that
    port. Never leave a ComfyUI or a vendor panel on a public port: tell the person.
 3b. **The account.** `python3 -m cloudgpu instances list` (and `status ID`, `snapshot ID`, `specs`) are free reads: what instances exist, what each is billed as (a pass's end time), its price and SSH door. Use them to answer "what do we have" before

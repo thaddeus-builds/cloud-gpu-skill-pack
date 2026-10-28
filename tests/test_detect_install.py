@@ -196,5 +196,94 @@ def test_start_sh_leaves_an_adapter_with_a_take_on_it_alone_and_the_adapter_bind
                     pass
 
 
+def make_tts(root: Path, name="index-tts/checkpoints", files=("config.yaml", "s2mel.pth")) -> Path:
+    d = root / name
+    d.mkdir(parents=True, exist_ok=True)
+    for f in files:
+        (d / f).write_bytes(b"x")
+    return d
+
+
+def test_the_voice_is_found_by_its_checkpoints_and_a_python_that_imports_it_and_is_never_a_missing_model():
+    with _t.tmpdir() as d:
+        home, comfy = Path(d) / "home", Path(d) / "home" / "ComfyUI"
+        comfy.mkdir(parents=True)
+        assert dm.find_tts(comfy, home, {}, can_import=lambda py: True) is None                            # nothing installed
+        make_tts(home, "index-tts/checkpoints", ("config.yaml",))                                         # IndexTTS 1.x: no s2mel
+        assert dm.find_tts(comfy, home, {}, can_import=lambda py: True) is None
+        ck = make_tts(home)
+        tried = []
+        r = dm.find_tts(comfy, home, {}, can_import=lambda py: tried.append(py) or py.endswith("index-tts/.venv/bin/python"))
+        assert r == {"dir": str(ck), "python": str(home / "index-tts" / ".venv" / "bin" / "python")} and tried[0] == r["python"], (r, tried)
+        assert dm.find_tts(comfy, home, {}, can_import=lambda py: False) is None                           # checkpoints but no Python that imports it: no voice
+        other = make_tts(Path(d), "elsewhere/ck")
+        r = dm.find_tts(comfy, home, {"CLOUDGPU_TTS_DIR": str(other), "CLOUDGPU_TTS_PYTHON": "/x/py"}, can_import=lambda py: py == "/x/py")
+        assert r == {"dir": str(other), "python": "/x/py"}                                                 # named: the search is not done
+        assert dm.find_tts(comfy, home, {"CLOUDGPU_TTS_DIR": str(Path(d) / "nope")}, can_import=lambda py: True) is None
+        make_tts(comfy, "models/TTS/IndexTTS-2")
+        assert dm.find_tts_dir(comfy, Path(d) / "nohome", {}) == comfy / "models" / "TTS" / "IndexTTS-2"   # under ComfyUI's models folder too
+        tree(comfy, L4090)                                                                                # the report carries it without touching `missing`
+        r = subprocess.run([sys.executable, str(Path(_t.ROOT) / "cloudgpu" / "detect_models.py"), "--comfy-root", str(comfy), "--compute-cap", "8.9"],
+                           capture_output=True, text=True, env={**os.environ, "HOME": str(home)})
+        assert r.returncode == 0 and json.loads(r.stdout)["missing"] == [] and "tts" in json.loads(r.stdout), r.stdout
+
+
+def test_install_sh_wires_the_voice_in_when_it_finds_one_and_says_voice_false_when_it_does_not():
+    if not Path("/bin/sh").exists():
+        return _t.skip("no sh")
+    with _t.tmpdir() as d:
+        home = Path(d) / "home"
+        tree(home / "ComfyUI", L4090)
+        make_tts(home)
+        pkg = Path(d) / "fakepkg" / "indextts"                                       # an "environment" that can import indextts.infer_v2
+        pkg.mkdir(parents=True)
+        (pkg / "__init__.py").write_text("")
+        (pkg / "infer_v2.py").write_text("")
+        venv = home / "index-tts" / ".venv" / "bin"
+        venv.mkdir(parents=True)
+        (venv / "python").write_text(f'#!/bin/sh\nPYTHONPATH="{pkg.parent}" exec "{sys.executable}" "$@"\n')
+        (venv / "python").chmod(0o755)
+        work = Path(d) / "box"
+        work.mkdir()
+        for f in ("onbox/install.sh", "detect_models.py", "onbox/models.4090.json", "adapter.py", "onbox/tts_worker.py"):
+            (work / Path(f).name).write_bytes((Path(_t.ROOT) / "cloudgpu" / f).read_bytes())
+        port = free_port()
+        env = {"PATH": os.environ["PATH"], "HOME": str(home), "CLOUDGPU_PYTHON": sys.executable}
+        box = home / "h3host"
+        try:
+            r = subprocess.run(["sh", str(work / "install.sh"), "auto", str(port)], input="t" * 32, env=env, capture_output=True, text=True, timeout=120)
+            assert r.returncode == 0 and "voice: IndexTTS2 found" in r.stdout, (r.stdout, r.stderr)
+            start = (box / "start.sh").read_text()
+            assert f"--tts-python '{venv / 'python'}'" in start and f"--tts-dir '{home / 'index-tts' / 'checkpoints'}'" in start and (box / "tts_worker.py").is_file()
+            h = None
+            for _ in range(30):
+                try:
+                    h = json.loads(urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=3).read())
+                    break
+                except OSError:
+                    time.sleep(0.3)
+            assert h is not None and h["voice"] is True, h
+            subprocess.run(["pkill", "-f", f"{box}/server.py"])
+            time.sleep(0.5)
+            for f in (home / "index-tts" / "checkpoints" / "s2mel.pth",):                  # the checkpoints go: a reinstall serves no voice
+                f.unlink()
+            r = subprocess.run(["sh", str(work / "install.sh"), "auto", str(port)], input="t" * 32, env=env, capture_output=True, text=True, timeout=120)
+            assert r.returncode == 0 and "not found" in r.stdout and "--tts" not in (box / "start.sh").read_text(), (r.stdout, r.stderr)
+            h = None
+            for _ in range(30):
+                try:
+                    h = json.loads(urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=3).read())
+                    break
+                except OSError:
+                    time.sleep(0.3)
+            assert h is not None and h["voice"] is False, h
+        finally:
+            for pid in subprocess.run(["pgrep", "-f", f"{home}/h3host/server.py"], capture_output=True, text=True).stdout.split():
+                try:
+                    os.kill(int(pid), signal.SIGTERM)
+                except OSError:
+                    pass
+
+
 if __name__ == "__main__":
     _t.main(globals())

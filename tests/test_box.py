@@ -223,7 +223,7 @@ def test_the_status_reads_the_box_and_the_pass_and_never_prints_a_secret():
         with autodl_api(lambda m, path, b, q: listing):
             doc = status(env)
         raw = json.dumps(doc)
-        assert doc["ready"] is True and doc["box"] == {"answers": True, "comfy": True, "busy": 0, "worker": "alive", "card": "NVIDIA GeForce RTX 4090, 49140 MiB"}, doc
+        assert doc["ready"] is True and doc["box"] == {"answers": True, "comfy": True, "busy": 0, "worker": "alive", "card": "NVIDIA GeForce RTX 4090, 49140 MiB", "voice": None}, doc
         assert doc["warnings"] == [] and not any("card" in n for n in doc["next"]), doc
         assert doc["account"]["backend"] == "autodl" and doc["account"]["billing"] == "daily" and doc["account"]["hours_left"] > 1000
         assert "t" * 30 not in raw and "dev-secret-value" not in raw and a.base not in raw

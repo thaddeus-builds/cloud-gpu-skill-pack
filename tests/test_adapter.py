@@ -838,5 +838,101 @@ def test_the_voice_process_does_not_inherit_the_token_and_an_expired_voice_reads
             b.close()
 
 
+LINE = adapter.LINE
+
+
+class Clock:
+    def __init__(self):
+        self.t = 1000.0
+
+    def __call__(self):
+        return self.t
+
+
+def test_the_line_lets_one_caller_go_at_a_time_in_the_order_they_joined():
+    with _t.tmpdir() as d:
+        b = Box(d)
+        b.host.line.clock = clock = Clock()
+        try:
+            a = b.call("POST", LINE, {"label": "host1/take-a"})[1]["data"]
+            c = b.call("POST", LINE, {"label": "host2/take-b"})[1]["data"]
+            e = b.call("POST", LINE, {"label": "host3/take-c"})[1]["data"]
+            assert (a["state"], a["ahead"], a["running"]) == ("go", 0, None) and a["lease_s"] == adapter.LEASE_S, a
+            assert (c["state"], c["ahead"], c["running"]) == ("waiting", 1, "host1/take-a") and (e["state"], e["ahead"]) == ("waiting", 2), (c, e)
+            assert b.call("GET", f"{LINE}/{c['ticket']}")[1]["data"]["state"] == "waiting"
+            assert b.call("DELETE", f"{LINE}/{a['ticket']}")[0] == 200
+            assert b.call("DELETE", f"{LINE}/{a['ticket']}")[0] == 200                        # idempotent
+            got = b.call("GET", f"{LINE}/{c['ticket']}")[1]["data"]
+            assert (got["state"], got["ahead"]) == ("go", 0), got
+            assert b.call("GET", f"{LINE}/{e['ticket']}")[1]["data"]["ahead"] == 1
+            lst = b.call("GET", LINE)[1]["data"]
+            assert [(x["state"], x["label"]) for x in lst["line"]] == [("go", "host2/take-b"), ("waiting", "host3/take-c")] and "ticket" not in json.dumps(lst)
+            clock.t += 5
+            assert b.call("GET", LINE)[1]["data"]["line"][0]["age_s"] == 5
+        finally:
+            b.close()
+
+
+def test_a_ticket_nobody_asks_about_is_dropped_so_a_dead_caller_never_blocks_the_line_and_asking_renews_it():
+    with _t.tmpdir() as d:
+        b = Box(d)
+        b.host.line.clock = clock = Clock()
+        try:
+            a = b.call("POST", LINE, {"label": "dead"})[1]["data"]
+            c = b.call("POST", LINE, {"label": "alive"})[1]["data"]
+            for _ in range(5):                                                                 # the second keeps asking, the first never does
+                clock.t += adapter.LEASE_S / 3
+                assert b.call("GET", f"{LINE}/{c['ticket']}")[0] == 200
+            got = b.call("GET", f"{LINE}/{c['ticket']}")[1]["data"]
+            assert got["state"] == "go" and got["ahead"] == 0, got                              # the dead one's lease ran out and the line moved up
+            assert b.call("GET", f"{LINE}/{a['ticket']}")[0] == 404
+            clock.t += adapter.LEASE_S + 1
+            assert b.call("GET", f"{LINE}/{c['ticket']}")[0] == 404 and b.call("GET", LINE)[1]["data"]["line"] == []
+            assert b.call("GET", f"{LINE}/zzzz")[0] == 404 and b.call("GET", f"{LINE}/../health")[0] == 404
+        finally:
+            b.close()
+
+
+def test_the_line_is_token_checked_bounded_and_its_labels_are_plain_text():
+    with _t.tmpdir() as d:
+        b = Box(d)
+        try:
+            for tok in (None, "wrong"):
+                assert b.call("POST", LINE, {"label": "x"}, token=tok)[0] == 401 and b.call("GET", LINE, token=tok)[0] == 401
+                assert b.call("GET", f"{LINE}/abc", token=tok)[0] == 401 and b.call("DELETE", f"{LINE}/abc", token=tok)[0] == 401
+            assert b.host.line.count() == 0
+            t = b.call("POST", LINE, {"label": "a\x00b\n" + "z" * 200})[1]["data"]
+            lab = b.call("GET", LINE)[1]["data"]["line"][0]["label"]
+            assert "\x00" not in lab and "\n" not in lab and len(lab) <= adapter.LABEL_MAX, lab
+            assert b.call("POST", LINE, [1])[0] == 400 and b.call("POST", LINE, {"label": 5})[0] == 200          # not an object: refused; a label that is not text is read as text
+            while b.host.line.count() < adapter.MAX_LINE:
+                b.host.line.join("x")
+            code, r = b.call("POST", LINE, {"label": "one too many"})
+            assert code == 429 and r["code"] == "LineFull", (code, r)
+            b.call("DELETE", f"{LINE}/{t['ticket']}")
+        finally:
+            b.close()
+
+
+def test_a_caller_in_the_line_keeps_the_box_busy_and_a_take_without_a_ticket_still_runs():
+    with _t.tmpdir() as d:
+        b = Box(d)
+        b.host.line.clock = clock = Clock()
+        try:
+            assert b.call("GET", "/health", token=None)[1]["busy"] == 0
+            t = b.call("POST", LINE, {"label": "waits"})[1]["data"]
+            assert b.call("GET", "/health", token=None)[1]["busy"] == 1                         # no power-off, no restart under a caller that waits
+            tid = b.call("POST", f"{API}/minimax_h3_lightx2v", FL)[1]["data"]["task_id"]        # an older client knows nothing of the line
+            assert b.wait(tid)["status"] == "SUCCESS"
+            b.call("DELETE", f"{LINE}/{t['ticket']}")
+            b.call("GET", f"{API}/result/{tid}")
+            assert b.call("GET", "/health", token=None)[1]["busy"] <= 1
+            u = b.call("POST", LINE, {})[1]["data"]
+            clock.t += adapter.LEASE_S + 1                                                      # the lease ends: busy goes back down by itself
+            assert b.host.line.count() == 0 and u["state"] == "go"
+        finally:
+            b.close()
+
+
 if __name__ == "__main__":
     _t.main(globals())

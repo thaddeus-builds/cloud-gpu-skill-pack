@@ -14,7 +14,7 @@ import urllib.parse
 import urllib.request
 from collections.abc import Mapping
 
-from . import config, net, tunnel
+from . import config, line, net, tunnel
 from .errors import CloudGpuError
 from .power import HOURLY_BILLING, Power, backend
 
@@ -166,6 +166,19 @@ class Box:
                     self.tunnel()                            # the door may have moved while it booted
                     h = self.health()
             self._ready = True
+
+    # ---- the line of callers on other machines (line.py) ----
+    def line_join(self, label: str = "") -> dict | None:
+        return line.join(self, label)
+
+    def line_poll(self, ticket: str) -> dict | None:
+        return line.poll(self, ticket)
+
+    def line_leave(self, ticket: str) -> None:
+        line.leave(self, ticket)
+
+    def line_list(self) -> list | None:
+        return line.listing(self)
 
     def _register_power_off(self) -> None:
         if not self._hooked and config.flag("AUTOOFF", self.env):

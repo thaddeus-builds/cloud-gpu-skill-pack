@@ -12,7 +12,7 @@ Read [`docs/cloud-gpu.md`](../../docs/cloud-gpu.md) for what it is, what it cost
 confirming a price in the project that uses it; running a take to "test" the box (a paid take: the box's hours); `instances ... --yes` of any kind (`create` starts billing,
 `release` destroys the instance's data, power-on starts the hourly billing): you may run the dry run and show it, a person gives `--yes`.
 
-1. **Look first, free.** `python3 -m cloudgpu status` (read only: no take, no power call, no value printed). `ready: true` means a take could go now; every line of `next` is one thing a
+1. **Look first, free.** `python3 -m cloudgpu status` (read only: no take, no power call, no value printed; `line` lists who runs on the box and who waits, `queue` this machine's takes). `ready: true` means a take could go now; every line of `next` is one thing a
    person must do (a setting, the tunnel, a pass that ended). Give the person those lines as they are.
 2. **A new box.** The person rents it and gives you its SSH line (not a password). `python3 -m cloudgpu bundle` makes what goes onto the box; the person (or you, when they
    have given you a key that already works) copies it, runs `sh install.sh auto 6009 < token-file`, and puts the public half of a restricted key in `authorized_keys` (docs, "Set up a box").

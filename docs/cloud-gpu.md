@@ -105,7 +105,7 @@ A third workflow, `indextts2-v1`, is the voice (0.6.0, below): the same call as 
 `GET /health` (no token) answers `{"ok", "comfy", "busy", "worker": "alive"|"dead", "card", "memory_mib", "voice"}` and, when asked with `?nonce=`, a `proof`. `ok` is false when the worker thread is dead. `busy` counts
 a take from the moment it is accepted (while its inputs are still being fetched) until it is over **and collected** (the video downloaded, or the failure read), or 300 s after it finished.
 `card` is the GPU the box runs on, as `nvidia-smi` names it with its memory (`NVIDIA GeForce RTX 4090, 49140 MiB`; `unknown` when it cannot say); `memory_mib` is the first card's memory as a number (`null` when unknown), so a consumer can check the size without parsing text: compare it with the box you declared
-(`CLOUDGPU_BOX`); `python3 -m cloudgpu status` does and says so in `next` when they differ.
+(`CLOUDGPU_BOX`); `python3 -m cloudgpu status` does and says so in `next` when they differ. `voice` is true when the box has the voice installed. From 0.7.0 a caller waiting in the box's line also counts in `busy`.
 
 Errors are `CloudGpuError` with `kind`: `key_missing` (a setting or a key file is not right), `http` (a vendor API answered no), `unknown` (not a backend), `down` (the box
 does not answer and nothing can start it), `timeout` (it did not come up); `next` lists what a person can do.
@@ -178,7 +178,7 @@ Two processes (two jobs, or a job and a person's run) that both see a free box n
 when it is the oldest waiting take that may use a box that is free (nothing running on it), not held, and comes up; a take pinned to one box (a result to fetch) waits in the line for that box only.
 A ticket is alive while its owner holds an `flock` on it, so a take that dies, however it dies, leaves no stale ticket and never blocks the line. A take that waits says so once
 (`waiting for its turn: take-3 (pid 4121) is running on a`), and `python3 -m cloudgpu status` lists the line (`queue`: state, box, pid, take folder, since) and adds a line to `next` for each.
-**Limits:** the line is per machine and per state directory: callers on different machines need the box to keep the line (issue 2), and two pools of different physical boxes that share a
+**Limits:** this line is per machine and per state directory (callers on different machines use the box's own line, next section), and two pools of different physical boxes that share a
 state directory and box names would wait on each other (give each set its own `CLOUDGPU_STATE_DIR`). Without `fcntl` (Windows) or a state directory that cannot be written there is no line and a take
 goes as in 0.4.
 
@@ -222,6 +222,21 @@ instance that is not shut down), power-on starts the hourly billing. The provide
 stays "no such call": said, never guessed), the normalising of its answers into `Instance` and the snapshot dict, and `create_problems` from its documented limits; add it to `registry()`;
 test it offline against the documented answers (copy `tests/test_vendors.py`). The power backend, the CLI, the status check and the skill then work for it with no other change.
 A vendor with no API at all needs nothing: `CLOUDGPU_POWER=none`. A call never runs a command taken from a file or the environment.
+
+### A line across machines (0.7.0)
+
+Callers on different machines cannot see each other's tickets, so each used to see a free box and send; the second waited inside the adapter's queue, unable to go to another box. The box now keeps the line
+itself: `POST /cloudgpu/line {"label"}` takes a place (`state` "go" for the front one, else "waiting" with `ahead` and the label of who `running`), `GET /cloudgpu/line/ID` asks where it is, `DELETE` leaves,
+and `GET /cloudgpu/line` lists who runs and who waits (token-checked, like every call but `/health`; ids are not listed). A ticket is dropped when nobody has asked about it for 60 s, so a machine that died
+never blocks the line, and while any ticket is live `/health` counts the box as busy (it is not powered off or restarted under a caller that waits).
+
+`Pool.take` does this by itself: once a take is the one for a free box on its own machine and the box is up, it takes a ticket on the box and goes when the box says "go"; a thread asks about the ticket
+every 20 s while the take runs and the ticket is given up at the end. With several boxes a take that waits on one box's line tries the next, keeps its place where it waits, and gives up the others when it
+goes. It says `waiting for its turn on BOX: 2 take(s) of other machines ahead (host/take-3 is running)` once on stderr (or through `on_wait`), and `python3 -m cloudgpu status` adds `line` (state, label, age) from the box.
+**Limits:** the line orders callers that use it. An adapter older than 0.7.0 (reinstall it with `bundle` and `install.sh`), a line that does not answer, or a caller that sends a take without a ticket is not stopped
+and not waited for: the take goes as before, and the adapter's own queue still serves it in order of arrival. The line is in the adapter's memory: an adapter restart forgets it (a restart already fails every
+waiting take), and a caller whose ticket was forgotten joins again at the back. A ticket's label (this machine's name and the take's folder name) is sent to the box. A hold (above) is still per machine. Out of scope, as before:
+autoscaling, or powering more boxes on to shorten a line.
 
 ## Safety
 

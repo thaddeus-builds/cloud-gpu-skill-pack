@@ -1,6 +1,6 @@
 """Where a box stands, read only: the settings (names, set or unset), the box's /health, the power backend's account view. Sends no take, powers
 nothing on or off, writes nothing, costs nothing, lists the active holds, prints no value of a setting. `ready` is true when a take could go to the box now; `next` says
-what a person must do otherwise, one line each. A consumer adds its own checks (prices, a project's switch) to `next`."""
+what a person must do otherwise, one line each. `line` is the box's own line of callers (who runs and who waits, any machine); `queue` is this machine's. A consumer adds its own checks (prices, a project's switch) to `next`."""
 
 from __future__ import annotations
 
@@ -84,6 +84,16 @@ def status(env: Mapping | None = None, envfile: str | None = None) -> dict:
     out["queue"] = [{k: t[k] for k in ("state", "box", "pid", "label", "since")} for t in line]
     for t in line:
         nxt.append(turns.describe(t) + " (a take of this machine)")
+    out["line"] = []                         # the box's own line: callers of every machine (None from an adapter older than 0.7.0 reads as empty)
+    if health is not None and reach_ok and not impostor:
+        try:
+            out["line"] = box.line_list() or []
+        except CloudGpuError:
+            out["line"] = []
+    if out["line"]:
+        running = [t for t in out["line"] if t.get("state") == "go"]
+        waiting = len(out["line"]) - len(running)
+        nxt.append((f"{running[0].get('label') or 'a take'} is running on the box" if running else "the box has callers in its line") + f" (the box's line: {waiting} waiting, callers of every machine)")
     out["holds"] = [{**h, "until_local": hold.clock(h["until"])} for h in holds]
     for h in holds:
         nxt.append(f"{h['box']} is held by {h['who']} until {hold.clock(h['until'])}" + (f" ({h['why']})" if h["why"] else "") + ": takes through the Pool wait for it")

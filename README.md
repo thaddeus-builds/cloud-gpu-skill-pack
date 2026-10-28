@@ -6,7 +6,7 @@ A box is a rented GPU with ComfyUI and the weights on it plus a small token-chec
 measured runs. Stdlib only, Python 3.9+.
 
 ```
-cloudgpu/           the package: Box (reach, tunnel, power), Pool (boxes in order of preference, a person's hold on a box, a line for the takes of one machine), vendors/ (the cloud accounts' APIs: autodl built in), power backends, the adapter (runs on the box), the voice (IndexTTS2) it can serve, detect_models.py, price, status, bench
+cloudgpu/           the package: Box (reach, tunnel, power), Pool (boxes in order of preference, a person's hold on a box, a line for the takes of one machine, a line on the box for the takes of every machine), vendors/ (the cloud accounts' APIs: autodl built in), power backends, the adapter (runs on the box), the voice (IndexTTS2) it can serve, detect_models.py, price, status, bench
 cloudgpu/onbox/       install.sh, tunnel.sh, the two verified model presets
 cloudgpu/data/      runs.jsonl: the takes measured on a 4090 48G and an RTX PRO 6000
 docs/cloud-gpu.md   what it costs, how to set up a box, the settings, the calls, safety

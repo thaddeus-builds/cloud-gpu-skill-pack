@@ -16,12 +16,18 @@ A box a person holds (cloudgpu/hold.py) counts as busy: the take goes to another
 default), until a hold ends. That includes a pool of one and a take sent earlier (a hold means stay off the box). `power_off_if_idle` leaves a held box on.
 
 Takes of one machine (processes sharing the state directory) also keep a line (turns.py): the oldest waiting take for a free box goes first, whichever process it is in.
+
+Takes of DIFFERENT machines keep a line on the box itself (line.py, the adapter's /cloudgpu/line): once a take has the box to itself on this machine and the box is up, it takes a ticket there
+and goes when the box says "go". While it runs a thread asks about the ticket every `beat` seconds (the adapter drops a ticket nobody asked about for 60 s, so a machine that died never blocks the
+line). With several boxes a take that waits in one box's line tries the next box, keeps its place where it waits, and gives up the others when it goes. A box whose adapter has no line (older than
+0.7.0), or that does not answer the line, is gone to as before: the line orders callers, it never stops one. The ticket's label (this machine's name and the take's folder name) goes to the box.
 """
 
 from __future__ import annotations
 
 import os
 import re
+import socket
 import sys
 import threading
 import time
@@ -36,6 +42,7 @@ POOL_VAR = "CLOUDGPU_POOL"
 PIN_FILE = "cloudgpu_box"
 RETRY_DOWN_S = 60.0
 POLL_S = 2.0
+BEAT_S = 20.0                      # a third of the adapter's lease (60 s)
 
 
 def boxes_from(env, box_cls=Box) -> list:
@@ -60,7 +67,7 @@ class _Skip(Exception):
 
 class Pool:
     def __init__(self, boxes: list, *, pin_file: str = PIN_FILE, retry_down: float = RETRY_DOWN_S, poll: float = POLL_S, clock=time.monotonic, sleep=time.sleep,
-                 state_dir=None, now=time.time, on_wait=None):
+                 state_dir=None, now=time.time, on_wait=None, beat: float = BEAT_S):
         self.boxes = boxes
         self.pin_file, self.retry_down, self.poll, self._clock, self._sleep = pin_file, retry_down, poll, clock, sleep
         self._state_dir, self._now = state_dir, now              # the holds' directory (None: CLOUDGPU_STATE_DIR, else ~/.cloudgpu) and the wall clock they are read against
@@ -69,6 +76,8 @@ class Pool:
         self._free = {n: threading.Lock() for n, _ in boxes}      # a box makes one take at a time
         self._here = threading.local()                           # the box this thread's take runs on
         self._down: dict[str, float] = {}                        # box name -> when it last failed to come up
+        self.beat = beat
+        self._noline: set = set()                                # boxes whose adapter has no line (older than 0.7.0)
 
     @classmethod
     def from_env(cls, env, **kw) -> "Pool":
@@ -116,10 +125,13 @@ class Pool:
         pinned = pin.read_text(encoding="utf-8").strip() if len(names) > 1 and pin.is_file() and sent(out_dir) else None
         eligible = [pinned] if pinned in names else names
         tk = turns.Ticket.open(self._sd(), [hold.box_key(n) for n in eligible], out_dir.name, self._now)
+        lines: dict = {}                                         # box name -> {box, id, label}: this take's ticket in that box's line
+        label = f"{socket.gethostname().split('.')[0]}/{out_dir.name}"
         try:
-            with self._take(out_dir, pin, names, pinned, tk) as box:
+            with self._take(out_dir, pin, names, pinned, tk, lines, label) as box:
                 yield box
         finally:
+            self._leave(lines)
             if tk is not None:
                 tk.close()
 
@@ -131,19 +143,83 @@ class Pool:
         self._say("turn", "waiting for its turn: " + (turns.describe(ahead[0]) if ahead else "another take is ahead"))
         return True
 
+    def _line(self, box, name: str, lines: dict, label: str) -> bool:
+        """True when the take may use `box`: it has no line to wait in, or the box says "go". False (and it says so) while callers of other machines are ahead. The ticket is kept in `lines`
+        and asked about on every call, which renews its lease; one the adapter forgot is joined again. Every failure to ask is True: the line orders callers, it does not stop one."""
+        if name in self._noline or not hasattr(box, "line_join"):
+            return True
+        try:
+            ent = lines.get(name)
+            st = box.line_poll(ent["id"]) if ent else None
+            if st is None:
+                st = box.line_join(label)
+                if st is None:
+                    self._noline.add(name)
+                    lines.pop(name, None)
+                    return True
+        except CloudGpuError:
+            return True
+        lines[name] = {"box": box, "id": st["ticket"], "label": label}
+        if st["state"] == "go":
+            return True
+        who = f" ({st['running']} is running)" if st.get("running") else ""
+        self._say("line:" + name, f"waiting for its turn on {name or 'the box'}: {st['ahead']} take(s) of other machines ahead{who}")
+        return False
+
+    @staticmethod
+    def _drop(lines: dict, name: str) -> None:
+        """Give up this take's ticket on `name`, best effort: one that is not given up ends by itself with its lease."""
+        ent = lines.pop(name, None)
+        if ent is not None:
+            try:
+                ent["box"].line_leave(ent["id"])
+            except CloudGpuError:
+                pass
+
+    def _leave(self, lines: dict, keep: str | None = None) -> None:
+        for n in [n for n in lines if n != keep]:
+            self._drop(lines, n)
+
     @contextmanager
-    def _take(self, out_dir, pin, names, pinned, tk):
+    def _running(self, name: str, lines: dict):
+        """While the take runs on `name`: its other tickets are given up and a thread keeps this one's lease alive."""
+        self._leave(lines, keep=name)
+        ent = lines.get(name)
+        stop = threading.Event()
+        th = None
+        if ent is not None:
+            def beat():
+                while not stop.wait(self.beat):
+                    try:
+                        if ent["box"].line_poll(ent["id"]) is None:         # forgotten: take a place again (the front, if no one else is waiting)
+                            st = ent["box"].line_join(ent["label"])
+                            if st is not None:
+                                ent["id"] = st["ticket"]
+                    except CloudGpuError:
+                        pass
+            th = threading.Thread(target=beat, daemon=True)
+            th.start()
+        try:
+            yield
+        finally:
+            stop.set()
+            if th is not None:
+                th.join(timeout=1.0)
+
+    @contextmanager
+    def _take(self, out_dir, pin, names, pinned, tk, lines, label):
         if len(self.boxes) == 1:
             name, box = self.boxes[0]
             while True:
                 h = self._held(name)
                 if h is not None:
                     self._announce(h)
-                elif not self._ahead(tk, name) and (tk is None or tk.run(hold.box_key(name))):
+                elif not self._ahead(tk, name) and self._line(box, name, lines, label) and (tk is None or tk.run(hold.box_key(name))):
                     break
                 self._sleep(self.poll)
             try:
-                yield box
+                with self._running(name, lines):
+                    yield box
             finally:
                 if tk is not None:
                     tk.wait()
@@ -180,8 +256,13 @@ class Pool:
                 except BaseException:
                     self._free[name].release()
                     raise
+                if not self._line(box, name, lines, label):                    # callers of other machines are ahead on this box: try the next, keep the place
+                    self._free[name].release()
+                    queued = True
+                    continue
                 if tk is not None and not tk.run(hold.box_key(name)):          # an older take of another process got there first
                     self._free[name].release()
+                    self._drop(lines, name)                                    # and the place it was given on the box goes to the next in the line
                     queued = True
                     continue
                 self._down.pop(name, None)
@@ -189,7 +270,8 @@ class Pool:
                 try:
                     out_dir.mkdir(parents=True, exist_ok=True)
                     pin.write_text(name, encoding="utf-8")
-                    yield box
+                    with self._running(name, lines):
+                        yield box
                 finally:
                     self._here.box = None
                     if tk is not None:

@@ -20,6 +20,15 @@ calls a client of that API already makes, so a client needs a base URL and a tok
     GET  /files/<random>.mp4|.wav                           -> the finished video or voice (the URL is the secret; valid FILE_TTL_S, after which the task
                                                                 reads FAILED "result expired")
 
+    POST /cloudgpu/line {"label"}   -> {"data":{"ticket":ID,"state":"go"|"waiting","ahead":N,"running":LABEL|null,"lease_s":60}}   the line of callers that use this box
+    GET  /cloudgpu/line/ID          -> the same; asking renews the ticket's lease (404: its lease ran out, or the adapter restarted: join again)
+    DELETE /cloudgpu/line/ID        -> leave (idempotent)
+    GET  /cloudgpu/line             -> {"data":{"line":[{"state","label","age_s"}],"lease_s":60}}: who runs and who waits (no ticket ids)
+                                                                (token-checked. A ticket is a place in an ordered line: "go" for the front one, so callers on DIFFERENT machines take the box one at a
+                                                                time in the order they joined. A ticket not asked about for LEASE_S is dropped, so a dead caller never blocks the line. The line
+                                                                orders the callers that use it; a caller that submits without a ticket still queues in the worker as before. While a ticket is live
+                                                                the box counts as busy in /health, so it is not powered off or restarted under a caller that waits.)
+
     Authorization: <CLOUDGPU_TOKEN>    the raw token, as autodl's own header (no "Bearer"); compared in constant time.
 
 Workflows (the names autodl publishes, so a project's avatar.workflow keeps working):
@@ -101,6 +110,10 @@ MODELS = {
     "vae_video": "MiniMax/minimax_h3_video_vae_fp16.safetensors",
     "vae_audio": "MiniMax/minimax_h3_audio_vae_fp32.safetensors",
 }
+LINE = "/cloudgpu/line"
+LEASE_S = 60                       # a ticket nobody asked about for this long is dropped; a caller asks about every LEASE_S / 3
+MAX_LINE = 64
+LABEL_MAX = 80
 TTS_WORKFLOW = "indextts2-v1"
 WORKFLOWS = {"minimax_h3_image_audio_to_video": "ref", "minimax_h3_lightx2v": "fl", TTS_WORKFLOW: "tts"}
 TTS_MAX_CHARS = 2000
@@ -336,6 +349,62 @@ def plan_voice(body: dict) -> dict:
     return p
 
 
+class Line:
+    """The ordered line of callers for this box (in memory: an adapter restart already fails every take, and a caller whose ticket is forgotten joins again at the back).
+    The ticket at the front is "go"; the others wait. Every call drops the tickets whose lease ran out, so the next one in line moves up even when its caller has not asked yet."""
+
+    def __init__(self, clock=time.monotonic):
+        self.clock, self.lock, self.tickets = clock, threading.Lock(), []
+
+    def _advance(self, now: float) -> None:
+        self.tickets = [t for t in self.tickets if t["expires"] > now]
+        if self.tickets:
+            self.tickets[0]["state"] = "go"            # the front one is always the one that goes: a ticket behind it was never granted
+
+    def _view(self, t: dict) -> dict:
+        i = self.tickets.index(t)
+        return {"ticket": t["id"], "state": t["state"], "ahead": i, "running": self.tickets[0]["label"] if i else None, "lease_s": LEASE_S}
+
+    def join(self, label) -> dict:
+        label = "".join(c for c in str(label or "") if c.isprintable())[:LABEL_MAX]
+        now = self.clock()
+        with self.lock:
+            self._advance(now)
+            if len(self.tickets) >= MAX_LINE:
+                raise Refused("the line is full")
+            t = {"id": secrets.token_hex(8), "label": label, "state": "waiting", "since": now, "expires": now + LEASE_S}
+            self.tickets.append(t)
+            self._advance(now)
+            return self._view(t)
+
+    def poll(self, tid: str):
+        """The ticket's place, with its lease renewed; None when there is no such ticket (lease over, left, or an adapter restarted)."""
+        now = self.clock()
+        with self.lock:
+            self._advance(now)
+            for t in self.tickets:
+                if t["id"] == tid:
+                    t["expires"] = now + LEASE_S
+                    return self._view(t)
+            return None
+
+    def leave(self, tid: str) -> None:
+        with self.lock:
+            self.tickets = [t for t in self.tickets if t["id"] != tid]
+            self._advance(self.clock())
+
+    def count(self) -> int:
+        with self.lock:
+            self._advance(self.clock())
+            return len(self.tickets)
+
+    def listing(self) -> list:
+        now = self.clock()
+        with self.lock:
+            self._advance(now)
+            return [{"state": t["state"], "label": t["label"], "age_s": int(now - t["since"])} for t in self.tickets]
+
+
 # ---- the server ------------------------------------------------------------------------------------------------------
 
 class Host:
@@ -347,6 +416,7 @@ class Host:
         self.tasks_dir.mkdir(parents=True, exist_ok=True)
         self.out_dir.mkdir(parents=True, exist_ok=True)
         self.public_base = public_base.rstrip("/")
+        self.line = Line()
         self.tts = tts                      # {"python", "dir", "worker"} when a voice is installed, else None
         self.q: queue.Queue = queue.Queue()
         self.lock = threading.Lock()
@@ -405,7 +475,8 @@ class Host:
             for tid, (done, _) in list(self.holds.items()):
                 if now - done > GRACE_S:
                     del self.holds[tid]
-            return self.n_active + len(self.holds)
+            n = self.n_active + len(self.holds)
+        return n + self.line.count()                    # a caller in the line holds the box busy: it is not powered off or restarted under them
 
     def collected(self, tid: str = "", key: str = ""):
         """A finished take was fetched (its video served, or its failure read): it no longer holds the box busy."""
@@ -778,6 +849,27 @@ def handler(host: Host):
             self._send(401, {"code": "Unauthorized", "data": None, "msg": "token refused"})
             return False
 
+        def _join_line(self):
+            if not self._authed():
+                return
+            try:
+                n = int(self.headers.get("Content-Length", "0"))
+            except ValueError:
+                n = -1
+            if not 0 <= n <= 4096:
+                return self._send(413, {"code": "RequestParameterIsWrong", "data": None, "msg": "the body is at most 4 KB"})
+            try:
+                body = json.loads(self.rfile.read(n)) if n else {}
+                if not isinstance(body, dict):
+                    raise ValueError
+            except ValueError:
+                return self._send(400, {"code": "RequestParameterIsWrong", "data": None, "msg": "the body is not a JSON object"})
+            try:
+                d = host.line.join(body.get("label"))
+            except Refused as e:
+                return self._send(429, {"code": "LineFull", "data": None, "msg": str(e)})
+            self._send(200, {"code": "Success", "data": d, "msg": ""})
+
         def do_GET(self):
             path = self.path.split("?")[0]
             if path == "/health":
@@ -796,6 +888,15 @@ def handler(host: Host):
                     shutil.copyfileobj(f, self.wfile)
                 host.collected(key=p.stem)           # sent to the end: the take is collected
                 return
+            if path == LINE or path.startswith(LINE + "/"):
+                if not self._authed():
+                    return
+                if path == LINE:
+                    return self._send(200, {"code": "Success", "data": {"line": host.line.listing(), "lease_s": LEASE_S}, "msg": ""})
+                d = host.line.poll(path[len(LINE) + 1:])
+                if d is None:
+                    return self._send(404, {"code": "NotFound", "data": None, "msg": "no such ticket: its lease ran out or the adapter restarted; join again"})
+                return self._send(200, {"code": "Success", "data": d, "msg": ""})
             if path.startswith(API + "/result/"):
                 if not self._authed():
                     return
@@ -805,8 +906,19 @@ def handler(host: Host):
                 return self._send(200, {"code": "Success", "data": d, "msg": ""})
             self._send(404, {"code": "NotFound", "data": None, "msg": ""})
 
+        def do_DELETE(self):
+            path = self.path.split("?")[0]
+            if not path.startswith(LINE + "/"):
+                return self._send(404, {"code": "NotFound", "data": None, "msg": ""})
+            if not self._authed():
+                return
+            host.line.leave(path[len(LINE) + 1:])
+            self._send(200, {"code": "Success", "data": None, "msg": ""})
+
         def do_POST(self):
             path = self.path.split("?")[0]
+            if path == LINE:
+                return self._join_line()
             if not path.startswith(API + "/") or path.startswith(API + "/result/"):
                 return self._send(404, {"code": "NotFound", "data": None, "msg": ""})
             if not self._authed():

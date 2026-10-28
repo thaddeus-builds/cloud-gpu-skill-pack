@@ -62,7 +62,7 @@ class FakeComfy:
                 outer.calls.append(self.path)
                 if self.path == "/interrupt":
                     return self._j(200, {})
-                if self.path == "/queue":
+                if self.path in ("/queue", "/free"):
                     return self._j(200, {})
                 if outer.mode == "refuse":
                     return self._j(400, {"error": {"message": "Prompt outputs failed validation"}})
@@ -96,11 +96,11 @@ class FakeComfy:
 class Box:
     """A running adapter over a temp folder and a FakeComfy."""
 
-    def __init__(self, d: str, mode="ok"):
+    def __init__(self, d: str, mode="ok", tts=None):
         self.root = Path(d) / "comfy"
         (self.root / "input").mkdir(parents=True)
         self.comfy = FakeComfy(self.root, mode)
-        self.host = adapter.Host(TOKEN, self.comfy.url, Path(d) / "state", self.root)
+        self.host = adapter.Host(TOKEN, self.comfy.url, Path(d) / "state", self.root, tts=tts)
         self.host.start_worker()
         self.srv = adapter.ThreadingHTTPServer(("127.0.0.1", 0), adapter.handler(self.host))
         self.base = f"http://127.0.0.1:{self.srv.server_address[1]}"
@@ -710,6 +710,131 @@ def test_the_tunnel_script_reuses_a_listener_only_when_it_proves_it_knows_the_to
                 assert r.returncode == 2 and ("port" in r.stderr or "host" in r.stderr), (bad, r.returncode, r.stderr)
         finally:
             squat.shutdown()
+            b.close()
+
+
+VOICE = {"prompt_text": "Hello there.", "prompt_simple": WAV}
+FAKE_WORKER = """import json, sys
+job = json.load(open(sys.argv[1]))
+open(job["out"] + ".seen", "w").write(json.dumps(job))
+if job["text"] == "boom":
+    print("CUDA out of memory", file=sys.stderr); sys.exit(1)
+if job["text"] == "nothing":
+    sys.exit(0)
+open(job["out"], "wb").write(b"RIFF" + b"\\0" * 60 if job["text"] != "junk" else b"junk" * 20)
+"""
+
+
+def voice_box(d, **kw):
+    """A box with a voice: a fake worker script that stands in for IndexTTS2 (it writes the job it was given next to its output)."""
+    worker = Path(d) / "fake_worker.py"
+    worker.write_text(FAKE_WORKER)
+    return Box(d, tts={"python": sys.executable, "dir": str(Path(d) / "ckpt"), "worker": str(worker)}, **kw)
+
+
+def test_a_voice_take_returns_a_wav_with_the_hosted_call_shape_and_is_served_as_audio():
+    with _t.tmpdir() as d:
+        b = voice_box(d)
+        try:
+            assert b.call("GET", "/health", token=None)[1]["voice"] is True
+            body = {**VOICE, "emo_control_method": "使用情感向量控制", "emo_happy": 0.6, "emo_calm": 0.2, "emo_ref_audio": ""}
+            code, r = b.call("POST", f"{API}/indextts2-v1", body)
+            assert code == 200, r
+            res = b.wait(r["data"]["task_id"])
+            assert res["status"] == "SUCCESS", res
+            item = res["results"][0]
+            assert item["type"] == "audio" and item["file_type"] == "wav" and item["url"].endswith(".wav"), item
+            raw = urllib.request.urlopen(item["url"], timeout=10)
+            assert raw.headers["Content-Type"] == "audio/wav" and raw.read(4) == b"RIFF"
+            seen = json.loads(next((b.host.out_dir).glob("*.wav.seen")).read_text())
+            assert seen["emo"] == "vector" and seen["vector"] == [0.6, 0, 0, 0, 0, 0, 0, 0.2] and seen["text"] == "Hello there." and seen["random"] is False
+            assert Path(seen["spk"]).parent == b.root / "input"
+            b.host.maintain(force=True)
+            assert b.call("GET", "/health", token=None)[1]["busy"] >= 0
+            assert not list((b.root / "input").iterdir()) and not list(Path(d, "state").glob("voice-*"))          # input and job file are gone
+            assert "/free" in b.comfy.calls                                                          # ComfyUI was asked to make room
+        finally:
+            b.close()
+
+
+def test_a_voice_that_is_the_samples_own_by_default_and_the_emotion_audio_is_fetched_only_when_asked_for():
+    with _t.tmpdir() as d:
+        b = voice_box(d)
+        try:
+            tid = b.call("POST", f"{API}/indextts2-v1", {**VOICE, "emo_ref_audio": WAV, "emo_alpha": 0.5})[1]["data"]["task_id"]
+            assert b.wait(tid)["status"] == "SUCCESS"
+            seen = json.loads(next(b.host.out_dir.glob("*.wav.seen")).read_text())
+            assert seen["emo"] == "same" and seen["emo_audio"] is None and seen["vector"] is None and seen["alpha"] == 0.5       # an unused sample is not fetched
+            tid = b.call("POST", f"{API}/indextts2-v1", {**VOICE, "emo_control_method": "使用情感参考音频", "emo_ref_audio": WAV})[1]["data"]["task_id"]
+            assert b.wait(tid)["status"] == "SUCCESS"
+            assert any(json.loads(p.read_text())["emo"] == "audio" and json.loads(p.read_text())["emo_audio"] for p in b.host.out_dir.glob("*.wav.seen"))
+        finally:
+            b.close()
+
+
+def test_a_voice_request_the_box_would_not_run_is_a_400_with_nothing_queued():
+    with _t.tmpdir() as d:
+        b = voice_box(d)
+        try:
+            bad = [({"prompt_simple": WAV}, "prompt_text"), ({"prompt_text": " ", "prompt_simple": WAV}, "prompt_text"), ({"prompt_text": "x" * 2001, "prompt_simple": WAV}, "split"),
+                   ({"prompt_text": "hi"}, "prompt_simple"), ({**VOICE, "emo_control_method": "使用情感描述文本控制"}, "text"),
+                   ({**VOICE, "emo_control_method": "nope"}, "not served"), ({**VOICE, "emo_control_method": "使用情感向量控制"}, "every emo_"),
+                   ({**VOICE, "emo_control_method": "使用情感向量控制", "emo_sad": 1.5}, "0 to 1"), ({**VOICE, "emo_control_method": "使用情感向量控制", "emo_sad": "x"}, "0 to 1"),
+                   ({**VOICE, "emo_control_method": "使用情感参考音频"}, "emo_ref_audio"), ({**VOICE, "emo_alpha": 2}, "0 to 1"),
+                   ({**VOICE, "prompt_simple": PNG}, "prompt_simple")]
+            for body, word in bad:
+                code, r = b.call("POST", f"{API}/indextts2-v1", body)
+                assert code == 400 and word in r["msg"], (body, code, r)
+            assert not list((b.root / "input").iterdir()) and b.call("GET", "/health", token=None)[1]["busy"] == 0
+        finally:
+            b.close()
+
+
+def test_a_box_without_a_voice_says_so_in_health_and_refuses_the_voice_workflow_before_fetching_anything():
+    with _t.tmpdir() as d:
+        b = Box(d)
+        try:
+            assert b.call("GET", "/health", token=None)[1]["voice"] is False
+            code, r = b.call("POST", f"{API}/indextts2-v1", VOICE)
+            assert code == 400 and "no voice installed" in r["msg"] and not list((b.root / "input").iterdir()), (code, r)
+        finally:
+            b.close()
+
+
+def test_a_voice_that_fails_says_why_leaves_no_file_and_the_worker_goes_on():
+    with _t.tmpdir() as d:
+        b = voice_box(d)
+        try:
+            for text, word in (("boom", "CUDA out of memory"), ("nothing", "without a wav"), ("junk", "without a wav")):
+                tid = b.call("POST", f"{API}/indextts2-v1", {**VOICE, "prompt_text": text})[1]["data"]["task_id"]
+                res = b.wait(tid)
+                assert res["status"] == "FAILED" and word in res["error"], (text, res)
+            assert not list(b.host.out_dir.glob("*.wav"))
+            tid = b.call("POST", f"{API}/indextts2-v1", VOICE)[1]["data"]["task_id"]
+            assert b.wait(tid)["status"] == "SUCCESS" and b.host.worker_thread.is_alive()
+        finally:
+            b.close()
+
+
+def test_the_voice_process_does_not_inherit_the_token_and_an_expired_voice_reads_failed():
+    with _t.tmpdir() as d:
+        worker = Path(d) / "env_worker.py"
+        worker.write_text("import json, os, sys\njob = json.load(open(sys.argv[1]))\n"
+                          "open(job['out'], 'wb').write(b'RIFF' + b'0' * 60)\n"
+                          "open(job['out'] + '.env', 'w').write(json.dumps(sorted(k for k in os.environ if k in ('CLOUDGPU_TOKEN', 'H3HOST_TOKEN'))))\n")
+        os.environ["CLOUDGPU_TOKEN"] = TOKEN
+        b = Box(d, tts={"python": sys.executable, "dir": d, "worker": str(worker)})
+        try:
+            tid = b.call("POST", f"{API}/indextts2-v1", VOICE)[1]["data"]["task_id"]
+            res = b.wait(tid)
+            assert res["status"] == "SUCCESS"
+            assert json.loads(next(b.host.out_dir.glob("*.wav.env")).read_text()) == []
+            for p in b.host.out_dir.glob("*.wav"):
+                os.utime(p, (time.time() - adapter.FILE_TTL_S - 5,) * 2)
+            res = b.call("GET", f"{API}/result/{tid}")[1]["data"]
+            assert res["status"] == "FAILED" and "expired" in res["error"], res
+        finally:
+            os.environ.pop("CLOUDGPU_TOKEN", None)
             b.close()
 
 

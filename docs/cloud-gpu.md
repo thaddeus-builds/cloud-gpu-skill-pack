@@ -100,14 +100,45 @@ Workflows (the names autodl publishes): `minimax_h3_image_audio_to_video` (`ref_
 `prompt`, `first_frame`, `last_frame`, `duration` 1..15, `resolution`, `seed`). `resolution` is `480p竖` or `768p竖` (1080p was never run on these cards). Inputs are http(s) URLs or
 `data:` URIs. The result URL is `/files/<random>.mp4` (relative when the box has no public address: join it to the base you reached it at) and lives one hour: download at once.
 A body the box will not run is HTTP 400 `RequestParameterIsWrong` before anything is queued. One take runs at a time; a take found waiting after a restart is failed, never re-run.
+A third workflow, `indextts2-v1`, is the voice (0.6.0, below): the same call as the hosted one, the result a wav.
 
-`GET /health` (no token) answers `{"ok", "comfy", "busy", "worker": "alive"|"dead", "card", "memory_mib"}` and, when asked with `?nonce=`, a `proof`. `ok` is false when the worker thread is dead. `busy` counts
+`GET /health` (no token) answers `{"ok", "comfy", "busy", "worker": "alive"|"dead", "card", "memory_mib", "voice"}` and, when asked with `?nonce=`, a `proof`. `ok` is false when the worker thread is dead. `busy` counts
 a take from the moment it is accepted (while its inputs are still being fetched) until it is over **and collected** (the video downloaded, or the failure read), or 300 s after it finished.
 `card` is the GPU the box runs on, as `nvidia-smi` names it with its memory (`NVIDIA GeForce RTX 4090, 49140 MiB`; `unknown` when it cannot say); `memory_mib` is the first card's memory as a number (`null` when unknown), so a consumer can check the size without parsing text: compare it with the box you declared
 (`CLOUDGPU_BOX`); `python3 -m cloudgpu status` does and says so in `next` when they differ.
 
 Errors are `CloudGpuError` with `kind`: `key_missing` (a setting or a key file is not right), `http` (a vendor API answered no), `unknown` (not a backend), `down` (the box
 does not answer and nothing can start it), `timeout` (it did not come up); `next` lists what a person can do.
+
+## A voice on the box (0.6.0)
+
+A Mode B take (a cloned voice drives the lips) or a narrator line needs speech before the picture. The adapter serves it as `indextts2-v1`, with the call shape of autodl's hosted workflow, so one
+rented box makes the voice and the picture and no hosted per-second API is called:
+
+```
+POST {api}/indextts2-v1   {"prompt_text": the line (at most 2000 characters),
+                           "prompt_simple": the voice sample to clone (an http(s) URL or a data: URI, 5 to 15 s of speech),
+                           "emo_control_method": "与音色参考音频相同" (default: the sample's own manner) | "使用情感向量控制" | "使用情感参考音频",
+                           "emo_happy" "emo_angry" "emo_sad" "emo_afraid" "emo_disgusted" "emo_melancholic" "emo_surprised" "emo_calm": 0 to 1 (the vector method),
+                           "emo_ref_audio": a sample of the manner to copy (the audio method), "emo_alpha": 0 to 1, "emo_random": bool}
+GET  {api}/result/{task_id}   -> results: [{"url": ".../files/<random>.wav", "type": "audio", "file_type": "wav"}]
+```
+
+The emotion described by a text (`使用情感描述文本控制`) is not served: it answers 400 and says to use the vector. A voice runs in the same single worker as the video takes, so it waits its turn behind them.
+
+**How it runs.** IndexTTS2 needs its own Python environment (torch and its dependencies), so the adapter, which stays standard library only, starts `tts_worker.py` in that environment once per voice, passing the job in a
+0600 file and without the token in its environment. The worker calls IndexTTS2's own `indextts.infer_v2.IndexTTS2.infer`. The model is loaded for each voice and its GPU memory is given back when the process ends; before
+each voice the adapter asks ComfyUI to unload its models (`POST /free`) so the voice fits next to them, and the next video take loads them again. That load is paid on every voice-then-video pair: measure it
+before a price is quoted for Mode B on a box (`bench`).
+
+**Set up.** `install.sh` looks for IndexTTS2's checkpoints (a folder with `config.yaml` and `s2mel.pth`, under ComfyUI's `models/` or a checkout in the home folder: `~/index-tts`, `~/IndexTTS-2`) and for a Python that can
+`import indextts.infer_v2` (`.venv` next to the checkout, else the box's own), and wires them into `start.sh` as `--tts-python` and `--tts-dir`. When it finds nothing the voice is simply not installed
+(the install does not fail): name them with `CLOUDGPU_TTS_DIR` and `CLOUDGPU_TTS_PYTHON` and run `install.sh` again. `GET /health` says `"voice": true|false`, and a box without a voice answers the workflow 400
+("this box has no voice installed") before anything is fetched. Install IndexTTS2 itself from its own project (`hf download IndexTeam/IndexTTS-2`), not from this package.
+
+**Not yet verified on a real card.** The adapter side is tested offline with a stand-in worker; `tts_worker.py` follows IndexTTS2's README (read 2026-10-28) but has not been run on a rented box, and the
+folder layout of the vendor images is not known (hence the two settings). The first voice on a box must be a person's paid test: check the wav, the time (model load included), and that ComfyUI and the voice
+fit the card together.
 
 ## A pool of boxes (0.3.0)
 

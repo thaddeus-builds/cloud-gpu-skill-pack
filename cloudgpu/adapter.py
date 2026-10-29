@@ -60,6 +60,7 @@ from __future__ import annotations
 import argparse
 import base64
 import errno
+import hashlib
 import hmac
 import http.client
 import ipaddress
@@ -89,6 +90,11 @@ MAX_INPUT = 64 * 1024 * 1024
 TASK_TIMEOUT_S = 1800
 COMFY_WAIT_S = 600                 # a cold box: ComfyUI is still starting when the first task arrives
 FILE_TTL_S = 3600                  # a task whose video is older than this is FAILED "result expired" (its record lives TASK_TTL_S)
+FILES = "/cloudgpu/files"           # the files a consumer sends once and then names by their sha256 (0.10.0)
+FILES_TTL_S = 7 * 24 * 3600        # a stored file nobody used for this long is deleted
+FILES_MAX = 512 * 1024 * 1024      # and the oldest go first when the store is over this
+SHA_REF = re.compile(r"sha256:([0-9a-f]{64})")
+FILE_KINDS = {".png": "image", ".jpg": "image", ".webp": "image", ".wav": "audio", ".mp3": "audio"}
 TASK_TTL_S = 24 * 3600             # a task file (and an input left behind) older than this is deleted
 MAINTAIN_EVERY_S = 600
 GRACE_S = 300                      # a finished take counts as busy this long unless it was collected
@@ -237,10 +243,25 @@ class PinnedHTTPS(urllib.request.HTTPSHandler):
         return self.do_open(_pinned(http.client.HTTPSConnection, self.ip), req, context=self._context)
 
 
-def fetch(ref: str, into: Path, kinds: tuple, what: str) -> Path:
-    """Write one input (a data: URI or an http(s) URL) into `into` and return the path; `kinds` are the accepted MIME prefixes."""
+def fetch(ref: str, into: Path, kinds: tuple, what: str, files: Path | None = None) -> Path:
+    """Write one input (a data: URI, an http(s) URL or `sha256:<hex>` of a file stored with PUT /cloudgpu/files) into `into` and return the path; `kinds` are the accepted MIME prefixes."""
     if not isinstance(ref, str) or not ref:
         raise Refused(f"{what} is missing")
+    m = SHA_REF.fullmatch(ref)
+    if m:
+        stored = stored_file(files, m.group(1)) if files is not None else None
+        if stored is None:
+            raise Refused(f"file_unknown: {what}: sha256:{m.group(1)} is not stored on this box (PUT {FILES}/{m.group(1)} first)")
+        if FILE_KINDS.get(stored.suffix) not in tuple(k.rstrip("/") for k in kinds):
+            raise Refused(f"{what}: the stored file is a {FILE_KINDS.get(stored.suffix, '?')}, expected {'/'.join(kinds)}")
+        path = into / f"cloudgpu_{uuid.uuid4().hex[:16]}{stored.suffix}"
+        try:
+            shutil.copyfile(stored, path)                  # a copy: the take's inputs are deleted when it is over, the stored file stays
+        except OSError:
+            path.unlink(missing_ok=True)
+            raise
+        os.utime(stored, None)                             # used now: it is not old
+        return path
     if ref.startswith("data:"):
         head, _, b64 = ref.partition(",")
         mime = head[5:].split(";")[0]
@@ -282,6 +303,15 @@ def fetch(ref: str, into: Path, kinds: tuple, what: str) -> Path:
         path.unlink(missing_ok=True)                 # a half-written input on a full disk
         raise
     return path
+
+
+def stored_file(files: Path, sha: str):
+    """The stored file of this sha256, or None."""
+    for ext in FILE_KINDS:
+        p = files / f"{sha}{ext}"
+        if p.is_file():
+            return p
+    return None
 
 
 def plan(workflow: str, body: dict) -> dict:
@@ -427,8 +457,9 @@ class Host:
         if not token:
             raise ValueError("the token is empty: the adapter would answer anyone")
         self.token, self.comfy, self.state, self.root = token, comfy.rstrip("/"), state, comfy_root
-        self.tasks_dir, self.out_dir = state / "tasks", state / "out"
+        self.tasks_dir, self.out_dir, self.files_dir = state / "tasks", state / "out", state / "files"
         self.tasks_dir.mkdir(parents=True, exist_ok=True)
+        self.files_dir.mkdir(parents=True, exist_ok=True)
         self.out_dir.mkdir(parents=True, exist_ok=True)
         self.public_base = public_base.rstrip("/")
         self.line = Line()
@@ -526,10 +557,51 @@ class Host:
                             p.unlink()
                 except OSError:
                     pass
+        stored = []
+        for p in self.files_dir.glob("*"):
+            try:
+                st = p.stat()
+                if p.suffix == ".tmp" and now - st.st_mtime > TASK_TTL_S or p.suffix != ".tmp" and now - st.st_mtime > FILES_TTL_S:
+                    p.unlink()
+                elif p.suffix != ".tmp":
+                    stored.append((st.st_mtime, st.st_size, p))
+            except OSError:
+                pass
+        total = sum(sz for _, sz, _ in stored)
+        for _, sz, p in sorted(stored):                    # over the cap: the longest unused go first
+            if total <= FILES_MAX:
+                break
+            try:
+                p.unlink()
+                total -= sz
+            except OSError:
+                pass
         for tid, t in list(self.mem.items()):
             if now - t.get("finished", t.get("created", now)) > TASK_TTL_S:
                 self.mem.pop(tid, None)
         self.sweep()
+
+    def put_file(self, sha: str, blob: bytes, mime: str) -> int:
+        """Store a file under its sha256 (the caller's claim is checked against the bytes). Returns its size; Refused when it is not what it says."""
+        ext = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp", "audio/wav": ".wav", "audio/x-wav": ".wav", "audio/mpeg": ".mp3", "audio/mp3": ".mp3"}.get(mime)
+        if ext is None:
+            raise Refused(f"a file of type {mime or '?'} is not stored here (png, jpeg, webp, wav, mp3)")
+        if not blob or len(blob) > MAX_INPUT:
+            raise Refused(f"the file is empty or over {MAX_INPUT // 2**20} MB")
+        if hashlib.sha256(blob).hexdigest() != sha:
+            raise Refused("the bytes are not the sha256 in the address")
+        have = stored_file(self.files_dir, sha)
+        if have is not None:
+            os.utime(have, None)
+            return have.stat().st_size
+        tmp = self.files_dir / f"{sha}.{uuid.uuid4().hex[:8]}.tmp"
+        try:
+            tmp.write_bytes(blob)
+            os.replace(tmp, self.files_dir / f"{sha}{ext}")
+        except OSError:
+            tmp.unlink(missing_ok=True)
+            raise
+        return len(blob)
 
     def submit(self, workflow: str, body: dict) -> str:
         p = plan(workflow, body)
@@ -545,18 +617,18 @@ class Host:
             inp = self.root / "input"
             inp.mkdir(parents=True, exist_ok=True)
             if p["kind"] == "tts":
-                files.append(fetch(body["prompt_simple"], inp, ("audio",), "prompt_simple"))
+                files.append(fetch(body["prompt_simple"], inp, ("audio",), "prompt_simple", self.files_dir))
                 if p["emo"] == "audio":
-                    files.append(fetch(body["emo_ref_audio"], inp, ("audio",), "emo_ref_audio"))
+                    files.append(fetch(body["emo_ref_audio"], inp, ("audio",), "emo_ref_audio", self.files_dir))
             elif p["kind"] == "ref":
-                files.append(fetch(body["ref_image_0"], inp, ("image",), "ref_image_0"))
-                files.append(fetch(body["ref_audio_0"], inp, ("audio",), "ref_audio_0"))
+                files.append(fetch(body["ref_image_0"], inp, ("image",), "ref_image_0", self.files_dir))
+                files.append(fetch(body["ref_audio_0"], inp, ("audio",), "ref_audio_0", self.files_dir))
                 for i in range(1, p.get("extra_images", 0) + 1):          # after the audio, so files[0] and files[1] mean what they always did
-                    files.append(fetch(body[f"ref_image_{i}"], inp, ("image",), f"ref_image_{i}"))
+                    files.append(fetch(body[f"ref_image_{i}"], inp, ("image",), f"ref_image_{i}", self.files_dir))
             else:
-                files.append(fetch(body["first_frame"], inp, ("image",), "first_frame"))
+                files.append(fetch(body["first_frame"], inp, ("image",), "first_frame", self.files_dir))
                 files.append(files[0] if body["last_frame"] == body["first_frame"]
-                             else fetch(body["last_frame"], inp, ("image",), "last_frame"))
+                             else fetch(body["last_frame"], inp, ("image",), "last_frame", self.files_dir))
             t["inputs"] = [f.name for f in files]
             self.save(t)
         except BaseException:               # a refused input, a full disk: leave nothing behind and stop counting
@@ -620,7 +692,7 @@ class Host:
         alive = wt is not None and wt.is_alive()
         card = self.card()
         d = {"ok": alive, "comfy": self.comfy_up(), "busy": self.busy(), "worker": "alive" if alive else "dead", "card": card,
-             "memory_mib": self._mem_mib if card != "unknown" else None, "voice": bool(self.tts)}
+             "memory_mib": self._mem_mib if card != "unknown" else None, "voice": bool(self.tts), "files": 1}
         if nonce and self.proof_ok and NONCE.fullmatch(nonce) and self._proof_allowed():
             d["proof"] = hmac.new(self.token.encode(), nonce.encode(), "sha256").hexdigest()
         return d
@@ -905,6 +977,14 @@ def handler(host: Host):
                     shutil.copyfileobj(f, self.wfile)
                 host.collected(key=p.stem)           # sent to the end: the take is collected
                 return
+            if path.startswith(FILES + "/"):
+                if not self._authed():
+                    return
+                sha = path[len(FILES) + 1:]
+                p = stored_file(host.files_dir, sha) if re.fullmatch(r"[0-9a-f]{64}", sha) else None
+                if p is None:
+                    return self._send(404, {"code": "NotFound", "data": None, "msg": "no such file"})
+                return self._send(200, {"code": "Success", "data": {"sha256": sha, "size": p.stat().st_size}, "msg": ""})
             if path == LINE or path.startswith(LINE + "/"):
                 if not self._authed():
                     return
@@ -922,6 +1002,30 @@ def handler(host: Host):
                     return self._send(404, {"code": "NotFound", "data": None, "msg": "no such task"})
                 return self._send(200, {"code": "Success", "data": d, "msg": ""})
             self._send(404, {"code": "NotFound", "data": None, "msg": ""})
+
+        def do_PUT(self):
+            path = self.path.split("?")[0]
+            if not path.startswith(FILES + "/"):
+                return self._send(404, {"code": "NotFound", "data": None, "msg": ""})
+            if not self._authed():
+                return
+            sha = path[len(FILES) + 1:]
+            if not re.fullmatch(r"[0-9a-f]{64}", sha):
+                return self._send(400, {"code": "RequestParameterIsWrong", "data": None, "msg": "the address is /cloudgpu/files/<sha256 in lower-case hex>"})
+            try:
+                n = int(self.headers.get("Content-Length", "0"))
+            except ValueError:
+                n = -1
+            if not 0 < n <= MAX_INPUT:
+                return self._send(413, {"code": "RequestParameterIsWrong", "data": None, "msg": f"the file must be 1 byte to {MAX_INPUT // 2**20} MB"})
+            blob = self.rfile.read(n)
+            try:
+                size = host.put_file(sha, blob, (self.headers.get("Content-Type") or "").split(";")[0].strip().lower())
+            except Refused as e:
+                return self._send(400, {"code": "RequestParameterIsWrong", "data": None, "msg": str(e)})
+            except OSError as e:
+                return self._send(507 if e.errno == errno.ENOSPC else 500, {"code": "InternalError", "data": None, "msg": "the box could not store the file"})
+            self._send(200, {"code": "Success", "data": {"sha256": sha, "size": size}, "msg": ""})
 
         def do_DELETE(self):
             path = self.path.split("?")[0]

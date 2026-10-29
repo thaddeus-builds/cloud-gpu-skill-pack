@@ -116,6 +116,15 @@ class Box:
         except urllib.error.HTTPError as e:
             return e.code, json.loads(e.read())
 
+    def put(self, path, data: bytes, ctype="image/png", token=TOKEN):
+        """A raw PUT (the file store): (status, JSON)."""
+        r = urllib.request.Request(self.base + path, data=data, method="PUT", headers={"Authorization": token, "Content-Type": ctype} if token else {"Content-Type": ctype})
+        try:
+            with urllib.request.urlopen(r, timeout=20) as resp:
+                return resp.status, json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read())
+
     def wait(self, tid, timeout=20):
         end = time.time() + _t.patient(timeout)
         while time.time() < end:
@@ -133,6 +142,75 @@ class Box:
 
 REF = {"resolution": "768p竖", "ref_image_0": PNG, "ref_audio_0": WAV, "audio_duration": 8}
 FL = {"resolution": "480p竖", "prompt": "She says: hello.", "first_frame": PNG, "last_frame": PNG, "duration": 4, "seed": 7}
+
+
+FILES = "/cloudgpu/files"
+BLOB = b"\x89PNG\r\n\x1a\nfake-picture-bytes" * 50
+SHA = hashlib.sha256(BLOB).hexdigest()
+
+
+def test_a_file_is_sent_once_and_named_by_its_sha256_in_every_take_after_it():
+    with _t.tmpdir() as d:
+        b = Box(d)
+        try:
+            assert b.call("GET", "/health", token=None)[1]["files"] == 1, "the box says it keeps files"
+            assert b.call("GET", f"{FILES}/{SHA}")[0] == 404
+            wav = b"RIFF....WAVEfmt " + b"\0" * 40
+            assert b.put(f"{FILES}/{SHA}", BLOB) == (200, {"code": "Success", "data": {"sha256": SHA, "size": len(BLOB)}, "msg": ""})
+            assert b.call("GET", f"{FILES}/{SHA}") == (200, {"code": "Success", "data": {"sha256": SHA, "size": len(BLOB)}, "msg": ""})
+            assert b.put(f"{FILES}/{SHA}", BLOB)[0] == 200, "sending it again is no error and stores nothing twice"
+            assert len(list(b.host.files_dir.glob(f"{SHA}.*"))) == 1
+            # the two frames of a Mode A take are one file named twice: the take carries 71 characters, not the picture
+            fl = {**FL, "first_frame": f"sha256:{SHA}", "last_frame": f"sha256:{SHA}"}
+            code, doc = b.call("POST", f"{API}/minimax_h3_lightx2v", fl)
+            assert code == 200 and b.wait(doc["data"]["task_id"])["status"] == "SUCCESS", doc
+            assert not list((b.root / "input").glob("cloudgpu_*")), "the take's copy is deleted when it is over"
+            assert len(list(b.host.files_dir.glob(f"{SHA}.*"))) == 1, "the stored file stays"
+            # a reference take: the picture by sha, the audio inline
+            code, doc = b.call("POST", f"{API}/minimax_h3_image_audio_to_video", {**REF, "ref_image_0": f"sha256:{SHA}"})
+            assert code == 200 and b.wait(doc["data"]["task_id"])["status"] == "SUCCESS", doc
+        finally:
+            b.close()
+
+
+def test_a_sha_the_box_does_not_have_a_wrong_address_a_wrong_type_and_a_wrong_kind_are_refused_with_a_reason():
+    with _t.tmpdir() as d:
+        b = Box(d)
+        try:
+            gone = "0" * 64
+            code, doc = b.call("POST", f"{API}/minimax_h3_lightx2v", {**FL, "first_frame": f"sha256:{gone}", "last_frame": f"sha256:{gone}"})
+            assert code == 400 and doc["msg"].startswith("file_unknown:") and gone in doc["msg"], doc
+            assert b.put(f"{FILES}/{gone}", BLOB)[0] == 400, "the bytes are not the sha in the address"
+            assert b.put(f"{FILES}/{SHA[:10]}", BLOB)[0] == 400 and b.put(f"{FILES}/{SHA.upper()}", BLOB)[0] == 400
+            assert b.put(f"{FILES}/{SHA}", BLOB, ctype="text/plain")[0] == 400
+            assert b.put(f"{FILES}/{SHA}", BLOB, token=None)[0] == 401 and b.put(f"{FILES}/{SHA}", BLOB, token="wrong")[0] == 401
+            assert b.call("GET", f"{FILES}/{SHA}", token=None)[0] == 401
+            assert b.put(f"{FILES}/{SHA}", BLOB)[0] == 200
+            code, doc = b.call("POST", f"{API}/minimax_h3_image_audio_to_video", {**REF, "ref_audio_0": f"sha256:{SHA}"})      # a picture where the audio goes
+            assert code == 400 and "expected audio" in doc["msg"], doc
+        finally:
+            b.close()
+
+
+def test_the_store_forgets_files_nobody_used_and_the_oldest_when_it_is_over_its_size():
+    with _t.tmpdir() as d:
+        b = Box(d)
+        try:
+            assert b.put(f"{FILES}/{SHA}", BLOB)[0] == 200
+            old = stored = next(b.host.files_dir.glob(f"{SHA}.*"))
+            long_ago = time.time() - adapter.FILES_TTL_S - 60
+            os.utime(stored, (long_ago, long_ago))
+            b.host.maintain(force=True)
+            assert not old.exists(), "unused for a week: gone"
+            assert b.put(f"{FILES}/{SHA}", BLOB)[0] == 200
+            used = next(b.host.files_dir.glob(f"{SHA}.*"))
+            os.utime(used, (long_ago, long_ago))
+            code, doc = b.call("POST", f"{API}/minimax_h3_image_audio_to_video", {**REF, "ref_image_0": f"sha256:{SHA}"})      # used now: not old
+            assert code == 200 and b.wait(doc["data"]["task_id"])["status"] == "SUCCESS"
+            b.host.maintain(force=True)
+            assert used.exists()
+        finally:
+            b.close()
 
 
 def test_frames_follow_the_templates_rule():
@@ -494,10 +572,10 @@ def test_a_refused_or_failed_submit_stops_counting_and_a_full_disk_is_a_json_ans
             assert first[0] == 200
             n = []
 
-            def full(ref, into, kinds, what):
+            def full(ref, into, kinds, what, files=None):
                 n.append(1)
                 if len(n) == 1:
-                    return real_fetch(ref, into, kinds, what)          # the first file is written, the second hits the full disk
+                    return real_fetch(ref, into, kinds, what, files)          # the first file is written, the second hits the full disk
                 raise OSError(errno.ENOSPC, "No space left on device")
             adapter.fetch = full
             assert b.wait(first[1]["data"]["task_id"])["status"] == "SUCCESS"

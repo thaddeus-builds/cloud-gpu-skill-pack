@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cloudgpu"
-version = "0.9.0"
+version = "0.10.0"
 description = "Run ComfyUI workflows (MiniMax-H3 first) on a GPU rented from any vendor that gives SSH"
 requires-python = ">=3.9"
 dependencies = []

@@ -14,7 +14,7 @@ import urllib.parse
 import urllib.request
 from collections.abc import Mapping
 
-from . import config, line, net, tunnel
+from . import config, files, line, net, tunnel
 from .errors import CloudGpuError
 from .power import HOURLY_BILLING, Power, backend
 
@@ -179,6 +179,14 @@ class Box:
 
     def line_list(self) -> list | None:
         return line.listing(self)
+
+    # ---- the file store (files.py) ----
+    def supports_files(self) -> bool:
+        return files.supported(self)
+
+    def ensure_file(self, path) -> str:
+        """`sha256:<hex>` of a local file the box now has: sent once, named in every take after it."""
+        return files.ensure(self, path)
 
     def _register_power_off(self) -> None:
         if not self._hooked and config.flag("AUTOOFF", self.env):

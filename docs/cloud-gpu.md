@@ -201,6 +201,16 @@ is first in, first out), and the box goes from one take to the next with no tran
   has the scenes in flight to fill it (a pack's `parallel`).
 - A take sent earlier and fetched later stays on its box as before. The result of a take is fetched inside its place, so a depth of 2 also overlaps one take's download with the next take's sampling.
 
+### A picture sent once: the box's file store (0.10.0)
+
+A take's body carries its pictures inline as `data:` URIs, so the same character still travels with every take, twice for a first-and-last-frame take (measured on 2026-10-29: 2.84 MB a body, 18 KB/s up,
+so a minute and more of every take, with the box idle). The adapter now keeps files by their sha256: `GET /cloudgpu/files/<sha256>` (200 with the size, or 404), `PUT /cloudgpu/files/<sha256>` (the raw bytes,
+`Content-Type` png, jpeg, webp, wav or mp3, up to 64 MB; the bytes must hash to the address; sending it again is no error and stores nothing twice), and a take's body may carry `sha256:<hex>` wherever it
+carries a picture or an audio. A sha the box does not have is a 400 whose message starts `file_unknown:`; the box says it has the store with `"files": 1` in `/health`. Files the box has not been asked for in a week go,
+and the oldest go first when the store passes 512 MB. A consumer asks `box.supports_files()` and then `box.ensure_file(path)` (cloudgpu/files.py), which sends the file once and returns the `sha256:<hex>`
+to put in the body; an adapter older than 0.10.0 does not say `files`, so it is never asked and the consumer sends the data inline as before. The adapter has to be installed on the box again for this (the
+consumer's `CLOUDGPU_QUEUE_DEPTH` does not need it).
+
 ## Cloud vendors and power
 
 A **vendor** (`cloudgpu/vendors/`, one module each) is the cloud account's own API behind one small interface (`class Vendor`): `list`/`all`, `get`, `status`, `snapshot`,

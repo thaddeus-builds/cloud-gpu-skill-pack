@@ -101,22 +101,27 @@ class Ticket:
         except OSError:
             pass                                  # an unwritable state costs only what `status` shows; the lock still keeps the ticket alive
 
-    def my_turn(self, box: str) -> bool:
-        """Nothing else runs on `box` and no older live ticket that may use it waits."""
+    def my_turn(self, box: str, depth: int = 1) -> bool:
+        """Fewer than `depth` other takes run on `box` and no older live ticket that may use it waits."""
+        running = 0
         for t in tickets(self.sd):
             if t["id"] == self.id:
                 continue
             if t["state"] == "running" and t["box"] == box:
+                running += 1
+            elif t["id"] < self.id and t["state"] == "waiting" and (not t["boxes"] or box in t["boxes"]):
                 return False
-            if t["id"] < self.id and t["state"] == "waiting" and (not t["boxes"] or box in t["boxes"]):
-                return False
-        return True
+        return running < depth
 
-    def run(self, box: str) -> bool:
-        """Mark this take as running on `box`. False (and back to waiting) when an older ticket got there at the same moment."""
+    def running_on(self, box: str) -> int:
+        """How many other takes of this machine run on `box` now."""
+        return sum(1 for t in tickets(self.sd, clean=False) if t["id"] != self.id and t["state"] == "running" and t["box"] == box)
+
+    def run(self, box: str, depth: int = 1) -> bool:
+        """Mark this take as running on `box`. False (and back to waiting) when `depth` older tickets got there already (at the same moment)."""
         self.state, self.box = "running", box
         self._write()
-        if any(t["id"] < self.id and t["state"] == "running" and t["box"] == box for t in tickets(self.sd)):
+        if sum(1 for t in tickets(self.sd) if t["id"] < self.id and t["state"] == "running" and t["box"] == box) >= depth:
             self.wait()
             return False
         return True

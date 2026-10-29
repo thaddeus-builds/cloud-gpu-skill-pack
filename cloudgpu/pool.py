@@ -8,7 +8,11 @@ and every setting that is not a box's is shared. With no pool one box on the pla
     with pool.take(out_dir) as box:        # the box this take runs on; pool.box is the same inside this thread
         ... send the take, wait for it, fetch it ...
 
-A box makes one take at a time (the adapter queues behind ComfyUI), so the pool holds a lock per box. A box that fails to come up is tried again after `retry_down` seconds, and
+A box makes one take at a time (the adapter queues behind ComfyUI), so the pool holds a place count per box: by default one take at a time on a box, from the moment it is sent until its result is
+fetched. That leaves the box idle while the next take's pictures and audio travel to it and while the last result comes back (about two thirds of a cycle on a consumer far from the boxes). With
+`CLOUDGPU_QUEUE_DEPTH=2` (or `depth=2`) two takes of this machine may be on a box: the second is sent while the first is sampled and the adapter queues it behind the first, so the box goes from
+one take to the next with no transfer in between. A take goes to the box with fewest of this machine's takes (the first in the list on a tie); only the first take on a box takes a place in its line
+(line.py): the ones behind it ride on that place. A box that fails to come up is tried again after `retry_down` seconds, and
 every box down with none busy raises the last box's error instead of waiting for ever. The choice is written to the take's folder (`pin_file`): when the consumer says a take was
 sent earlier (`sent`), the take runs on the box that holds it and on no other, because only that box can give its result back.
 
@@ -43,6 +47,8 @@ PIN_FILE = "cloudgpu_box"
 RETRY_DOWN_S = 60.0
 POLL_S = 2.0
 BEAT_S = 20.0                      # a third of the adapter's lease (60 s)
+DEPTH_VAR = "CLOUDGPU_QUEUE_DEPTH"
+MAX_DEPTH = 4
 
 
 def boxes_from(env, box_cls=Box) -> list:
@@ -65,15 +71,40 @@ class _Skip(Exception):
     pass
 
 
+class _Places:
+    """`depth` places on one box for the takes of this process, each taken for the life of a take. The interface of a lock (`acquire(blocking)`, `release`, `locked`) so a depth of 1 is the old lock."""
+
+    def __init__(self, depth: int = 1):
+        self.depth, self.inflight, self._mu = max(1, int(depth)), 0, threading.Lock()
+
+    def acquire(self, blocking: bool = True) -> bool:
+        while True:
+            with self._mu:
+                if self.inflight < self.depth:
+                    self.inflight += 1
+                    return True
+            if not blocking:
+                return False
+            time.sleep(0.005)
+
+    def release(self) -> None:
+        with self._mu:
+            self.inflight = max(0, self.inflight - 1)
+
+    def locked(self) -> bool:
+        return self.inflight >= self.depth
+
+
 class Pool:
     def __init__(self, boxes: list, *, pin_file: str = PIN_FILE, retry_down: float = RETRY_DOWN_S, poll: float = POLL_S, clock=time.monotonic, sleep=time.sleep,
-                 state_dir=None, now=time.time, on_wait=None, beat: float = BEAT_S):
+                 state_dir=None, now=time.time, on_wait=None, beat: float = BEAT_S, depth: int = 1):
         self.boxes = boxes
         self.pin_file, self.retry_down, self.poll, self._clock, self._sleep = pin_file, retry_down, poll, clock, sleep
         self._state_dir, self._now = state_dir, now              # the holds' directory (None: CLOUDGPU_STATE_DIR, else ~/.cloudgpu) and the wall clock they are read against
         self._on_wait = on_wait or (lambda msg: print(msg, file=sys.stderr, flush=True))
         self._said: dict[str, str] = {}                          # what was already announced, by kind: a wait is said once, not every poll
-        self._free = {n: threading.Lock() for n, _ in boxes}      # a box makes one take at a time
+        self.depth = max(1, min(int(depth), MAX_DEPTH))          # takes of this machine on a box at once (the adapter queues them behind each other)
+        self._free = {n: _Places(self.depth) for n, _ in boxes}
         self._here = threading.local()                           # the box this thread's take runs on
         self._down: dict[str, float] = {}                        # box name -> when it last failed to come up
         self.beat = beat
@@ -82,6 +113,10 @@ class Pool:
     @classmethod
     def from_env(cls, env, **kw) -> "Pool":
         kw.setdefault("state_dir", hold.state_dir(env))
+        try:
+            kw.setdefault("depth", int(str(env.get(DEPTH_VAR) or 1).strip()))
+        except ValueError:
+            raise CloudGpuError("key_missing", f"{DEPTH_VAR} must be a number from 1 to {MAX_DEPTH}") from None
         return cls(boxes_from(env), **kw)
 
     def _held(self, name: str) -> dict | None:
@@ -137,11 +172,19 @@ class Pool:
 
     def _ahead(self, tk, name: str) -> bool:
         """True (and it says so, once) when another take of this machine is ahead of this one for `name`."""
-        if tk is None or tk.my_turn(hold.box_key(name)):
+        if tk is None or tk.my_turn(hold.box_key(name), self.depth):
             return False
         ahead = tk.blockers(hold.box_key(name))
         self._say("turn", "waiting for its turn: " + (turns.describe(ahead[0]) if ahead else "another take is ahead"))
         return True
+
+    def _first_on(self, tk, name: str) -> bool:
+        """True when no other take of this machine runs on `name` (its place in the box's line is then this take's); with a depth of 1 it is always so."""
+        if self.depth <= 1:
+            return True
+        if tk is not None:
+            return tk.running_on(hold.box_key(name)) == 0
+        return self._free[name].inflight <= 1
 
     def _line(self, box, name: str, lines: dict, label: str) -> bool:
         """True when the take may use `box`: it has no line to wait in, or the box says "go". False (and it says so) while callers of other machines are ahead. The ticket is kept in `lines`
@@ -214,7 +257,7 @@ class Pool:
                 h = self._held(name)
                 if h is not None:
                     self._announce(h)
-                elif not self._ahead(tk, name) and self._line(box, name, lines, label) and (tk is None or tk.run(hold.box_key(name))):
+                elif not self._ahead(tk, name) and (not self._first_on(tk, name) or self._line(box, name, lines, label)) and (tk is None or tk.run(hold.box_key(name), self.depth)):
                     break
                 self._sleep(self.poll)
             try:
@@ -227,7 +270,7 @@ class Pool:
         last: CloudGpuError | None = None
         while True:
             held, queued = [], False
-            for name, box in self.boxes:
+            for name, box in sorted(self.boxes, key=lambda nb: self._free[nb[0]].inflight):      # the box with fewest takes of this machine first, the list's order on a tie
                 if pinned in names and name != pinned:
                     continue
                 h = self._held(name)
@@ -256,11 +299,11 @@ class Pool:
                 except BaseException:
                     self._free[name].release()
                     raise
-                if not self._line(box, name, lines, label):                    # callers of other machines are ahead on this box: try the next, keep the place
+                if self._first_on(tk, name) and not self._line(box, name, lines, label):      # callers of other machines are ahead on this box: try the next, keep the place
                     self._free[name].release()
                     queued = True
                     continue
-                if tk is not None and not tk.run(hold.box_key(name)):          # an older take of another process got there first
+                if tk is not None and not tk.run(hold.box_key(name), self.depth):          # an older take of another process got there first
                     self._free[name].release()
                     self._drop(lines, name)                                    # and the place it was given on the box goes to the next in the line
                     queued = True

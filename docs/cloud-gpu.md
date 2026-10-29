@@ -96,10 +96,14 @@ api, token = box.api_base(), box.token()
 box.power_off_if_idle()          # only when GET /health answered and says busy is 0, and the account says the box is billed by the hour
 ```
 
-Workflows (the names autodl publishes): `minimax_h3_image_audio_to_video` (`ref_image_0`, `ref_audio_0`, `audio_duration` 1..15, `resolution`) and `minimax_h3_lightx2v` (Mode A:
+Workflows (the names autodl publishes): `minimax_h3_image_audio_to_video` (`ref_image_0`, optional `ref_image_1`..`ref_image_8`, `ref_audio_0`, `audio_duration` 1..15, `resolution`) and `minimax_h3_lightx2v` (Mode A:
 `prompt`, `first_frame`, `last_frame`, `duration` 1..15, `resolution`, `seed`). `resolution` is `480p竖` or `768p竖` (1080p was never run on these cards). Inputs are http(s) URLs or
 `data:` URIs. The result URL is `/files/<random>.mp4` (relative when the box has no public address: join it to the base you reached it at) and lives one hour: download at once.
 A body the box will not run is HTTP 400 `RequestParameterIsWrong` before anything is queued. One take runs at a time; a take found waiting after a restart is failed, never re-run.
+More than one reference picture (0.8.0): `ref_image_1`..`ref_image_8` take the same URL or `data:` rules as `ref_image_0`, in order with no gap (a gap or a ninth is a 400). In the prompt they are
+`<Picture 2>`, `<Picture 3>` and so on (`ref_image_0` is `<Picture 1>`), e.g. "holding the box shown in <Picture 2>; the box looks exactly like <Picture 2>". With no `prompt` the default is used as before and
+reads only `<Picture 1>`, so a caller that sends extra pictures should send its own prompt. Measured by the issue's author on the 4090 (48 GB) with one extra picture: 480p, 4.4 s take, 66 s (queued behind another take); 768p, 135 s;
+the large print on a held pack is legible, small print is not. **Not measured:** the 32 GB card (4080 SUPER) with extra pictures: it held 31 GB with one picture, so it may run out of memory.
 A third workflow, `indextts2-v1`, is the voice (0.6.0, below): the same call as the hosted one, the result a wav.
 
 `GET /health` (no token) answers `{"ok", "comfy", "busy", "worker": "alive"|"dead", "card", "memory_mib", "voice"}` and, when asked with `?nonce=`, a `proof`. `ok` is false when the worker thread is dead. `busy` counts

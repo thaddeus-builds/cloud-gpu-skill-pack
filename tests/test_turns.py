@@ -61,6 +61,20 @@ def test_an_older_waiting_take_goes_first_and_a_running_take_blocks_only_its_box
         r.close()
 
 
+def test_a_depth_lets_that_many_takes_run_on_a_box_and_running_on_counts_them():
+    with tempfile.TemporaryDirectory() as sd:
+        t1, t2, t3 = (turns.Ticket.open(sd, ["a"], f"t{i}") for i in (1, 2, 3))
+        try:
+            assert t1.my_turn("a", 2) and t1.run("a", 2)
+            assert t2.my_turn("a", 2) is True and t2.my_turn("a", 1) is False         # t1 runs: a depth of 2 leaves a place, a depth of 1 does not
+            assert t2.run("a", 2) and t1.running_on("a") == 1 and t3.running_on("a") == 2
+            assert t3.my_turn("a", 2) is False and t3.my_turn("a", 3) is True         # two run: a third waits at a depth of 2
+            assert t3.run("a", 2) is False, "two older takes already run there: it is put back to waiting"
+        finally:
+            for t in (t1, t2, t3):
+                t.close()
+
+
 def test_a_pool_of_one_keeps_the_line_in_arrival_order_across_pools():
     with _t.tmpdir() as sd, _t.tmpdir() as d:
         first = pool(sd, "x")

@@ -166,12 +166,42 @@ def test_a_request_the_box_would_not_run_is_refused_before_anything_is_queued():
                    ("minimax_h3_lightx2v", {**FL, "first_frame": WAV}),                              # audio where an image goes
                    ("minimax_h3_image_audio_to_video", {**REF, "ref_audio_0": PNG}),
                    ("minimax_h3_image_audio_to_video", {**REF, "audio_duration": "x"}),
-                   ("minimax_h3_image_audio_to_video", {k: v for k, v in REF.items() if k != "ref_image_0"})]
+                   ("minimax_h3_image_audio_to_video", {k: v for k, v in REF.items() if k != "ref_image_0"}),
+                   ("minimax_h3_image_audio_to_video", {**REF, "ref_image_2": PNG}),                  # a gap in the numbering
+                   ("minimax_h3_image_audio_to_video", {**REF, **{f"ref_image_{i}": PNG for i in range(1, 10)}}),     # one over the limit
+                   ("minimax_h3_image_audio_to_video", {**REF, "ref_image_1": ""}),
+                   ("minimax_h3_image_audio_to_video", {**REF, "ref_image_1": WAV})]                 # audio where a picture goes
             for wf, body in bad:
                 code, doc = b.call("POST", f"{API}/{wf}", body)
                 assert code == 400 and doc["code"] == "RequestParameterIsWrong", (wf, body.get("first_frame", "")[:30], code, doc)
             assert not list((b.root / "input").iterdir()) and not list((b.host.tasks_dir).iterdir())
             assert not b.comfy.graphs
+        finally:
+            b.close()
+
+
+def test_extra_reference_pictures_become_load_image_nodes_after_the_first():
+    with _t.tmpdir() as d:
+        b = Box(d)
+        try:
+            body = {**REF, **{f"ref_image_{i}": PNG for i in range(1, 9)}, "prompt": "She holds the box in <Picture 2>."}
+            code, doc = b.call("POST", f"{API}/minimax_h3_image_audio_to_video", body)
+            assert code == 200 and doc["code"] == "Success", doc
+            assert b.wait(doc["data"]["task_id"])["status"] == "SUCCESS"
+            g = b.comfy.graphs[-1]
+            ins = g["7"]["inputs"]
+            assert ins["ref_images.ref_image_0"] == ["5", 0] and ins["prompt"].endswith("<Picture 2>.")
+            for i in range(1, 9):
+                assert ins[f"ref_images.ref_image_{i}"] == [f"5r{i}", 0]
+                assert g[f"5r{i}"]["class_type"] == "LoadImage" and g[f"5r{i}"]["inputs"]["image"].endswith(".png")
+            assert "ref_images.ref_image_9" not in ins
+            assert not list((b.root / "input").iterdir())          # every picture was removed once the take ended
+            n = len(b.comfy.graphs)
+            code, doc = b.call("POST", f"{API}/minimax_h3_image_audio_to_video", REF)
+            assert b.wait(doc["data"]["task_id"])["status"] == "SUCCESS"
+            g = b.comfy.graphs[n]          # one picture: the graph is what it always was
+            assert not [k for k in g["7"]["inputs"] if k.startswith("ref_images.") and k != "ref_images.ref_image_0"]
+            assert not [k for k in g if k.startswith("5r")] and g["7"]["inputs"]["prompt"] == adapter.DEFAULT_REF_PROMPT
         finally:
             b.close()
 

@@ -32,7 +32,8 @@ calls a client of that API already makes, so a client needs a base URL and a tok
     Authorization: <CLOUDGPU_TOKEN>    the raw token, as autodl's own header (no "Bearer"); compared in constant time.
 
 Workflows (the names autodl publishes, so a project's avatar.workflow keeps working):
-    minimax_h3_image_audio_to_video   ref_image_0 + ref_audio_0 + audio_duration + resolution
+    minimax_h3_image_audio_to_video   ref_image_0 (+ ref_image_1 .. ref_image_8) + ref_audio_0 + audio_duration + resolution
+                                      more pictures are <Picture 2>, <Picture 3> .. in the prompt (no gaps in the numbering); with no prompt given the default is used
                                       FL2VA-free path: the reference-to-video model (ref2va) with the take's audio as <Audio 1>
     minimax_h3_lightx2v               prompt + first_frame + last_frame + duration + resolution (+ seed)
                                       Mode A: the FL2VA model speaks the prompt's line itself
@@ -116,6 +117,7 @@ MAX_LINE = 64
 LABEL_MAX = 80
 TTS_WORKFLOW = "indextts2-v1"
 WORKFLOWS = {"minimax_h3_image_audio_to_video": "ref", "minimax_h3_lightx2v": "fl", TTS_WORKFLOW: "tts"}
+MAX_EXTRA_IMAGES = 8                # ref_image_1 .. ref_image_8 beside ref_image_0 (the hosted workflow takes up to 9 pictures)
 TTS_MAX_CHARS = 2000
 TTS_TIMEOUT_S = 900                # the model is loaded for each voice (its VRAM is given back after), so this includes the load
 TTS_MAGIC = b"RIFF"
@@ -140,7 +142,8 @@ def frames_for(seconds: float) -> int:
 
 # ---- ComfyUI graph -------------------------------------------------------------------------------------------------
 
-def graph(kind: str, *, w: int, h: int, seconds: float, image: str, audio: str | None, prompt: str, seed: int, prefix: str) -> dict:
+def graph(kind: str, *, w: int, h: int, seconds: float, image: str, audio: str | None, prompt: str, seed: int, prefix: str,
+          extra_images: tuple | list = ()) -> dict:
     lora, steps = MODELS["lora_" + kind], MODELS["steps_" + kind]
     g = {
         "1": {"class_type": "UNETLoader", "inputs": {"unet_name": MODELS["unet_" + kind], "weight_dtype": "default"}},
@@ -166,6 +169,9 @@ def graph(kind: str, *, w: int, h: int, seconds: float, image: str, audio: str |
         g["7"] = {"class_type": "MiniMaxH3ReferenceToVideo", "inputs": {
             "clip": ["2", 0], "vae": ["3", 0], "audio_vae": ["4", 0], "prompt": prompt, "width": w, "height": h, "length": n,
             "ref_image_size": "match", "ref_images.ref_image_0": ["5", 0], "ref_audios.ref_audio_0": ["6", 0]}}
+        for i, name in enumerate(extra_images, 1):          # <Picture 2> is ref_image_1, and so on
+            g[f"5r{i}"] = {"class_type": "LoadImage", "inputs": {"image": name}}
+            g["7"]["inputs"][f"ref_images.ref_image_{i}"] = [f"5r{i}", 0]
     else:
         g["7"] = {"class_type": "MiniMaxH3ImageToVideo", "inputs": {
             "clip": ["2", 0], "vae": ["3", 0], "prompt": prompt, "width": w, "height": h, "length": n,
@@ -304,12 +310,21 @@ def plan(workflow: str, body: dict) -> dict:
             if not body.get(k):
                 raise Refused(f"{k} is required")
         prompt = body.get("prompt") or DEFAULT_REF_PROMPT
+        extra = [k for k in body if isinstance(k, str) and k.startswith("ref_image_") and k != "ref_image_0"]
+        want = [f"ref_image_{i}" for i in range(1, len(extra) + 1)]
+        if sorted(extra) != want or len(extra) > MAX_EXTRA_IMAGES:
+            raise Refused(f"the extra pictures are ref_image_1 .. ref_image_{MAX_EXTRA_IMAGES}, in order with no gap")
+        if not all(body[k] for k in extra):
+            raise Refused("an extra reference picture is empty")
     else:
         for k in ("prompt", "first_frame", "last_frame"):
             if not body.get(k):
                 raise Refused(f"{k} is required")
         prompt = body["prompt"]
-    return {"kind": kind, "w": w, "h": h, "seconds": secs, "seed": seed, "prompt": str(prompt)}
+    p = {"kind": kind, "w": w, "h": h, "seconds": secs, "seed": seed, "prompt": str(prompt)}
+    if kind == "ref" and extra:
+        p["extra_images"] = len(extra)
+    return p
 
 
 def _unit(v, what: str) -> float:
@@ -536,6 +551,8 @@ class Host:
             elif p["kind"] == "ref":
                 files.append(fetch(body["ref_image_0"], inp, ("image",), "ref_image_0"))
                 files.append(fetch(body["ref_audio_0"], inp, ("audio",), "ref_audio_0"))
+                for i in range(1, p.get("extra_images", 0) + 1):          # after the audio, so files[0] and files[1] mean what they always did
+                    files.append(fetch(body[f"ref_image_{i}"], inp, ("image",), f"ref_image_{i}"))
             else:
                 files.append(fetch(body["first_frame"], inp, ("image",), "first_frame"))
                 files.append(files[0] if body["last_frame"] == body["first_frame"]
@@ -717,7 +734,7 @@ class Host:
         p, files = t["plan"], t["inputs"]
         prefix = f"cloudgpu/{t['id']}"
         g = graph(p["kind"], w=p["w"], h=p["h"], seconds=p["seconds"], image=files[0], audio=files[1] if p["kind"] == "ref" else None,
-                  prompt=p["prompt"], seed=p["seed"], prefix=prefix)
+                  prompt=p["prompt"], seed=p["seed"], prefix=prefix, extra_images=files[2:] if p["kind"] == "ref" else ())
         if p["kind"] == "fl" and files[1] != files[0]:
             g["5b"]["inputs"]["image"] = files[1]
         try:

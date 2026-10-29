@@ -190,6 +190,100 @@ def test_a_hold_file_is_atomic_expires_by_itself_is_capped_and_is_not_taken_over
         assert hold.release(sd, "a") is True and hold.release(sd, "a") is False
 
 
+class LineBox(FakeBox):
+    """A box whose adapter has the line (0.7.0): it always says go and counts the tickets given out."""
+
+    def __init__(self):
+        super().__init__()
+        self.joins, self.leaves = 0, 0
+
+    def line_join(self, label):
+        self.joins += 1
+        return {"ticket": f"T{self.joins}", "state": "go", "ahead": 0}
+
+    def line_poll(self, ticket):
+        return {"ticket": ticket, "state": "go", "ahead": 0}
+
+    def line_leave(self, ticket):
+        self.leaves += 1
+
+
+def running_takes(pool, n, d, hold_s=5.0):
+    """Start `n` takes in threads that stay inside `pool.take` until `go` is set; returns (threads, which box each got, the event that lets them go)."""
+    got, go, threads = {}, threading.Event(), []
+
+    def one(i):
+        with pool.take(Path(d) / f"t{i}") as box:
+            got[i] = box
+            go.wait(hold_s)
+
+    for i in range(n):
+        th = threading.Thread(target=one, args=(i,), daemon=True)
+        th.start()
+        threads.append(th)
+        time.sleep(0.1)                                         # in arrival order
+    return threads, got, go
+
+
+def test_with_a_depth_of_two_a_box_takes_a_second_take_and_the_least_loaded_box_goes_first():
+    with _t.tmpdir() as d:
+        pool, boxes = pool_of(True, True, depth=2)
+        a, b = boxes[0][1], boxes[1][1]
+        threads, got, go = running_takes(pool, 4, d)
+        try:
+            assert got[0] is a and got[1] is b, "the second take goes to the empty box, not to the first box's second place"
+            assert {got[2], got[3]} == {a, b} and len(got) == 4 and pool._free["a"].locked() and pool._free["b"].locked()
+            extra = []
+            th = threading.Thread(target=lambda: [extra.append(1) for _ in [pool.take(Path(d) / "t9").__enter__()]], daemon=True)
+            th.start()
+            time.sleep(0.3)
+            assert not extra, "a fifth take waits: both boxes have their two"
+        finally:
+            go.set()
+        for t in threads:
+            t.join(5)
+        th.join(5)
+        assert extra == [1] and not pool._free["a"].locked()
+
+
+def test_a_depth_of_one_is_the_old_lock_and_the_setting_is_read_from_the_environment():
+    with _t.tmpdir() as d:
+        pool, boxes = pool_of(True, True)
+        assert pool.depth == 1
+        threads, got, go = running_takes(pool, 2, d)
+        try:
+            assert got[0] is boxes[0][1] and got[1] is boxes[1][1] and pool._free["a"].locked() and pool._free["b"].locked()
+        finally:
+            go.set()
+        for t in threads:
+            t.join(5)
+    base = {"CLOUDGPU_STATE_DIR": tempfile.mkdtemp(prefix="cloudgpu-state-")}
+    assert Pool.from_env({**base}).depth == 1
+    assert Pool.from_env({**base, "CLOUDGPU_QUEUE_DEPTH": "2"}).depth == 2
+    assert Pool.from_env({**base, "CLOUDGPU_QUEUE_DEPTH": "9"}).depth == 4, "more than four is four"
+    with _t.raises("key_missing"):
+        Pool.from_env({**base, "CLOUDGPU_QUEUE_DEPTH": "many"})
+
+
+def test_only_the_first_take_on_a_box_takes_a_place_in_its_line_and_the_cross_process_queue_lets_depth_takes_run():
+    with _t.tmpdir() as d:
+        box = LineBox()
+        pool = Pool([("a", box), ("b", FakeBox())], poll=0.01, depth=2, state_dir=tempfile.mkdtemp(prefix="cloudgpu-state-"))
+        pool.boxes[1] = ("b", FakeBox(up=False))                  # only box a comes up: both takes land on it
+        pool.retry_down = 1000.0
+        threads, got, go = running_takes(pool, 2, d)
+        try:
+            from cloudgpu import turns
+            assert got[0] is box and got[1] is box and box.joins == 1, (got, box.joins)       # the second rides on the first's place
+            run = [t for t in turns.tickets(pool._state_dir) if t["state"] == "running"]
+            assert len(run) == 2 and {t["box"] for t in run} == {hold.box_key("a")}, run
+        finally:
+            go.set()
+        for t in threads:
+            t.join(5)
+        assert box.leaves >= 1
+
+
 def test_the_state_directory_comes_from_the_setting():
     assert hold.state_dir({"CLOUDGPU_STATE_DIR": "/x/y"}) == Path("/x/y") and hold.state_dir({}) == Path.home() / ".cloudgpu"
     assert Pool.from_env({"CLOUDGPU_STATE_DIR": "/x/y"})._state_dir == Path("/x/y")

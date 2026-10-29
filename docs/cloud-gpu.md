@@ -186,6 +186,21 @@ A ticket is alive while its owner holds an `flock` on it, so a take that dies, h
 state directory and box names would wait on each other (give each set its own `CLOUDGPU_STATE_DIR`). Without `fcntl` (Windows) or a state directory that cannot be written there is no line and a take
 goes as in 0.4.
 
+### Two takes on a box at once: `CLOUDGPU_QUEUE_DEPTH` (0.9.0)
+
+By default one take of this machine is on a box from the moment it is sent until its result is fetched. The box sees only the sampling of that take; while the next take's pictures and audio travel to it
+and while the last result comes back it is idle. Measured on 2026-10-29 on a consumer far from the boxes (RTX 4090 and 4080 SUPER, one pack making talking-head takes at 480x864, the character still sent
+inline with every take): created to done 40 s and 54 to 63 s on the box, a new take arriving every 134 s and 164 s, the boxes working 29 and 33 percent of the time, at most one connection to the adapter at
+any moment on either box (issue 12). `CLOUDGPU_QUEUE_DEPTH=2` lets two takes of this machine be on a box: the second is sent while the first is sampled, the adapter queues it behind the first (ComfyUI
+is first in, first out), and the box goes from one take to the next with no transfer in between.
+
+- **Choice of box.** A take goes to the box with fewest takes of this machine, the first in the list on a tie, so two takes go to two boxes before either box gets a second.
+- **The line (line.py).** Only the first take on a box takes a place in its line, the one after it rides on that place; a take of another machine that gets "go" meanwhile is queued by the adapter behind ours.
+- **The queue of this machine (turns.py).** Counts running takes per box against the depth, oldest first as before.
+- **Values.** 1 is today's behaviour and the default; 2 is the one to try; 4 is the most. Raise it only while the box has memory for a second queued request (the adapter holds the body, a few MB) and the consumer
+  has the scenes in flight to fill it (a pack's `parallel`).
+- A take sent earlier and fetched later stays on its box as before. The result of a take is fetched inside its place, so a depth of 2 also overlaps one take's download with the next take's sampling.
+
 ## Cloud vendors and power
 
 A **vendor** (`cloudgpu/vendors/`, one module each) is the cloud account's own API behind one small interface (`class Vendor`): `list`/`all`, `get`, `status`, `snapshot`,

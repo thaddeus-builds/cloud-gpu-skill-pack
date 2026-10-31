@@ -229,7 +229,7 @@ is not alive, an account call that fails or does not list the instance.
 `Box.ensure_up()` powers a box on **without asking a person**. That is the design, not an oversight: who may power boxes on is decided by whoever holds the account's token
 (`AUTODL_DEV_TOKEN`) and `CLOUDGPU_INSTANCE`, the operator team, and not by an agent or a customer. A process that must not be able to start billing is simply not given those two.
 `CLOUDGPU_AUTOOFF=1` powers the box off again at exit, but only when this process was the one that powered it on (a box that was already on is left to whoever started it).
-The `--yes` gate is on the CLI (`instances power-on`, `power-off`, `create`, `release`): it is **a person's convention, not something enforced** (there is no tty check, any process can
+The `--yes` gate is on the CLI (`instances power-on`, `power-off`, `create`, `release`; an agent inside a person's allowance: "An allowance for an agent", below): it is **a person's convention, not something enforced** (there is no tty check, any process can
 pass `--yes`), so the rule "a person gives `--yes`" is kept by whoever runs the command, and by not giving a process the account token. `bench` is a paid take and has no gate at all.
 
 **autodl** covers every call of the account API ([docs](https://www.autodl.art/docs/app_api/): create, snapshot, status, list, power_on, power_off, release; the card spec ids of
@@ -266,6 +266,57 @@ goes. It says `waiting for its turn on BOX: 2 take(s) of other machines ahead (h
 and not waited for: the take goes as before, and the adapter's own queue still serves it in order of arrival. The line is in the adapter's memory: an adapter restart forgets it (a restart already fails every
 waiting take), and a caller whose ticket was forgotten joins again at the back. A ticket's label (this machine's name and the take's folder name) is sent to the box. A hold (above) is still per machine. Out of scope, as before:
 autoscaling, or powering more boxes on to shorten a line.
+
+## An allowance for an agent: renting its own boxes (0.11.0)
+
+By default an agent rents nothing: `create` and `release` are a person's, as above. A person can give an agent a limit to work inside, and then the agent may keep boxes up by itself.
+
+```
+python3 -m cloudgpu quota set --by NAME --max-instances 2 --max-cny-per-day 100 --price v-48g=3.2 --price pro6000-p=7   # a person; --by and the time are recorded
+python3 -m cloudgpu quota show                                                                                        # free: the numbers, who set them, what is spent today
+python3 -m cloudgpu instances create --agent --spec request.json [--yes]    # inside the allowance, or refused with the reason; a dry run says which
+python3 -m cloudgpu instances release --agent ID [--yes]                    # only an instance this agent created, shut down, not wired in the settings
+python3 -m cloudgpu instances ensure --count 2 --spec template.json [--specs v-48g,pro6000-p] [--data-centers westDC3,beijingDC2] [--patience 600] [--yes]
+```
+
+- **The allowance** is a file (`~/.cloudgpu/quota.json`, `CLOUDGPU_QUOTA_FILE`, beside it the ledger, `CLOUDGPU_STATE_DIR`). No file, or a 0, means the agent creates nothing. Numbers: how many
+  instances the agent has made at once (`max_instances`), the CNY it may spend in a day (`max_cny_per_day`), and the price per hour the person assumes for each card spec (`--price`; a spec with
+  no price is not created, because what it would spend is not known). Today's spend is **an upper bound** from the ledger: every instance the agent made counts at its price from its creation
+  (or midnight) to its release, as if it ran all that time, and each new one has `reserve_hours` (default 2) of its price set aside first. The real price (the snapshot's) goes in the ledger
+  when it is known; if it is above the assumed one the result says so.
+- **The ledger** (`ledger.jsonl`, append only): time, action (`create`, `release`, `power-on`, `quota-set`, `gone`), instance, card spec, data center, price per hour, who triggered it
+  (`CLOUDGPU_ACTOR`, else `agent` or `person`). The attempt is written before the vendor is called, so a ledger that cannot be written stops a create instead of leaving a bill with no record.
+- **Release** by the agent needs three things: the ledger shows this agent created it (a box a person made is never released by the agent), it is shut down, and no setting wires it to a box
+  (`CLOUDGPU_INSTANCE`, `CLOUDGPU_<NAME>_INSTANCE`: a take may be running there).
+- **`ensure --count N`** (the verb "have N boxes up"): lists the account, counts the boxes this setup knows (the ones wired in the settings plus the ledger's) that are running, powers on the ones that
+  are off and billed by the hour (a pass that is off may have ended: reported for a person to renew, not touched), then creates what is still missing, inside the allowance, from the template
+  for each card spec in order (default `v-48g`, the 4090 48G; `CLOUDGPU_ENSURE_SPECS`) at each data center in order (default `westDC3,beijingDC2`; `CLOUDGPU_ENSURE_DATA_CENTERS`).
+  **A card that is not in stock** is tried again after 20, 40, 80, 160, 300 seconds (at most `--patience` in all); every other failure (no balance, a refused request, the allowance) is
+  reported once and not retried. The AutoDL API page lists no error codes, so "no stock" is read from the words of the refusal (stock, insufficient, no available, 库存 ... but not balance or
+  token): **check the first real "no card" answer and adjust `NO_STOCK_WORDS` in `vendors/autodl.py`**. The report: `running`, `powered_on`, `created`, `missing`, `failures` (what, where, kind,
+  reason, tries), `now_running` and each new box's SSH door and price. Exit 0 when nothing is missing, 1 otherwise. Without `--yes` it prints the plan and the allowance's verdict and changes nothing.
+- **What this does not stop.** Like `--yes`, `--agent` is a convention: a process that has the account token can call the vendor, or edit the quota file, itself. The allowance is a limit
+  only when the agent cannot change the file (another user's file, mode 0644; a file others can write is not believed) and the account token is not the only thing between it and the money.
+  The vendor's own balance is the hard stop: keep it as small as the allowance.
+
+### A new box: what is automatic and what is not
+
+A created instance is only the image. What `ensure` and `create --agent` do for it: create from the image with the start command `/root/h3host/start.sh` (so an adapter that is already in the image
+starts by itself), wait until the account says `running`, read the SSH door and the price, write the ledger. What stays with a person, and why:
+
+| step | automatic? | why |
+|---|---|---|
+| rent from an image or snapshot, start the adapter at boot | yes, if the image already has the adapter and `~/h3host/start.sh` | `start_command` on create |
+| wait for `running`, read SSH door, price | yes | the account's status and snapshot (never a password) |
+| put a key on the box, run `bundle` + `install.sh` | **no** | a new box has only the password the API deliberately does not return; a key must already be in the image |
+| the adapter token (`CLOUDGPU_TOKEN`) | **no** | a secret: a person pipes it |
+| wire it to the settings (`CLOUDGPU_<NAME>_INSTANCE`, `_SSH`, `_BASE`, `_TOKEN`) | **no** | the settings are the operator's |
+| the voice service (VoxCPM, port 8190) | **no** | adcut's `docs/voxcpm.md`; not copied here |
+| `python3 -m cloudgpu status` says `ready`, one measured take, a price confirmed | **no** | a paid take and a price are a person's |
+
+The way to make the first row cover the rest: set one box up once by hand, put the restricted key in its `authorized_keys`, install the adapter and the voice service, save it as a private image,
+and use that image as `application_uuid` in the template (whether AutoDL gives a saved image an application uuid that `create` takes has **not** been checked here: ask in the console before relying on it).
+A box made from it then needs only the settings wired and `status` run.
 
 ## Safety
 

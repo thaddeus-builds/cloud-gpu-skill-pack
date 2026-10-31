@@ -10,8 +10,11 @@ Everything is the vendor's account API (vendors/); nothing here talks to a box. 
 
 from __future__ import annotations
 
+import contextlib
+import os
 import re
 import time
+import uuid
 from collections.abc import Mapping
 
 from . import config, quota
@@ -25,6 +28,7 @@ START_COMMAND = "/root/h3host/start.sh"                   # as in box.py: writte
 BACKOFF_S = (20, 40, 80, 160, 300)                        # waits between rounds when a card is not in stock
 PATIENCE_S = 600                                          # the most `ensure` waits in all for stock
 BOOT_WAIT_S = 300                                         # how long a new instance is waited for to say `running`
+GONE_GRACE_S = 900                                        # an instance the account does not list is called gone only this long after it was created (a listing can lag)
 INSTANCE_VAR = re.compile(r"^(?:CLOUDGPU|H3HOST)_(?:[A-Za-z0-9]+_)?INSTANCE$")
 
 
@@ -51,10 +55,27 @@ class Steward:
         alive = {i.id for i in listing}
         mine = self.ledger.created(self.vendor.name)
         for i in list(mine):
-            if i not in alive:
+            if i not in alive and self.now() - float(mine[i].get("ts") or 0) > GONE_GRACE_S:
                 self.ledger.append("gone", vendor=self.vendor.name, instance=i, actor="steward")
                 del mine[i]
         return mine
+
+    @contextlib.contextmanager
+    def _locked(self):
+        """One create or release at a time per state directory (check, record, call), so two runs cannot both pass the same check."""
+        try:
+            import fcntl
+            sd = quota.state_dir(self.env)
+            sd.mkdir(parents=True, exist_ok=True, mode=0o700)
+            fd = os.open(sd / "lock", os.O_WRONLY | os.O_CREAT, 0o600)
+        except (ImportError, OSError):
+            yield
+            return
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            os.close(fd)
 
     def _log(self, action: str, **f) -> dict:
         return self.ledger.append(action, vendor=self.vendor.name, actor=self.actor, agent=self.agent, **f)
@@ -70,10 +91,12 @@ class Steward:
         if not price:
             raise CloudGpuError("over_quota", f"the allowance has no price for card spec {sp!r}, so what it would spend is not known",
                                 [f"a person adds it: python3 -m cloudgpu quota set ... --price {sp}=CNY_PER_HOUR"])
-        if len(mine) + 1 > q.max_instances:
-            raise CloudGpuError("over_quota", f"the allowance is {q.max_instances} instance(s) at once and the agent already has {len(mine)}",
+        pending = self.ledger.unresolved()
+        if len(mine) + len(pending) + 1 > q.max_instances:
+            raise CloudGpuError("over_quota", f"the allowance is {q.max_instances} instance(s) at once and the agent already has {len(mine)}"
+                                + (f" plus {len(pending)} create(s) whose outcome is not known (a timeout?): look at `instances list`" if pending else ""),
                                 ["release one the agent made (when nothing runs on it), or a person raises max_instances"])
-        spent, need = quota.spent_today(self.ledger.rows(), self.now()), price * q.reserve_hours
+        spent, need = quota.spent_today(self.ledger.rows(), self.now()) + sum(price * q.reserve_hours for _ in pending), price * q.reserve_hours
         if spent + need > q.max_cny_per_day:
             raise CloudGpuError("over_quota", f"the day's allowance is CNY {q.max_cny_per_day:g}; about {spent:.2f} is spent (an upper bound) and one more instance needs {need:.2f} set aside",
                                 ["wait for tomorrow, or a person raises max_cny_per_day"])
@@ -81,22 +104,35 @@ class Steward:
 
     # ---- create ----
     def create(self, spec: dict, listing=None) -> dict:
+        with self._locked():
+            return self._create(spec, listing)
+
+    def _create(self, spec: dict, listing=None) -> dict:
         """Create one instance. For the agent: only inside the allowance. The attempt is in the ledger before the call (so a ledger that cannot be written stops it, not a bill
         with no record), the instance and its price after. CloudGpuError(no_stock) when the vendor has no card of that spec there now."""
         problems = self.vendor.create_problems(spec)
         if problems:
             raise CloudGpuError("key_missing", "the request is not one the vendor takes: " + "; ".join(problems))
-        listing = self.vendor.all() if listing is None else listing
-        mine = self.sync(listing)
+        try:
+            listing = self.vendor.all() if listing is None else listing
+            mine = self.sync(listing)
+        except CloudGpuError:
+            if self.agent:
+                raise
+            mine = {}                                           # a person's create never needed the list
+        attempt = uuid.uuid4().hex[:12]
         assumed = self.check_create(spec, mine) if self.agent else self.quota.prices.get(spec.get("gpu_spec_uuid"), 0.0)
         centers = spec.get("data_center_list")
         try:
-            self._log("create-attempt", spec=spec.get("gpu_spec_uuid"), data_center=",".join(centers or []))
+            self._log("create-attempt", attempt=attempt, spec=spec.get("gpu_spec_uuid"), data_center=",".join(centers or []))
         except OSError as e:
             raise CloudGpuError("key_missing", f"the ledger cannot be written ({e.strerror}): nothing was created") from None
         try:
             iid = self.vendor.create(spec)
         except CloudGpuError as e:
+            if e.status != "network" and e.kind != "timeout":            # the vendor answered no: nothing was created; a lost answer stays unresolved and counts
+                with contextlib.suppress(OSError):
+                    self._log("create-failed", attempt=attempt, reason=e.message[:120])
             if self.vendor.is_no_stock(e):
                 raise CloudGpuError("no_stock", f"no {spec.get('gpu_spec_uuid')} in stock" + (f" at {','.join(centers)}" if centers else ""), status=e.status, detail=e.detail) from None
             raise
@@ -109,7 +145,7 @@ class Steward:
             pass
         row = {"instance": iid, "spec": spec.get("gpu_spec_uuid"), "data_center": ",".join(centers or []), "price_cny_per_hour": price, "price_source": source}
         try:
-            self._log("create", **row)
+            self._log("create", attempt=attempt, **row)
         except OSError as e:
             raise CloudGpuError("key_missing", f"instance {iid} WAS created but the ledger cannot be written ({e.strerror}): record it by hand, it is billing") from None
         out = {"created": iid, **{k: row[k] for k in ("spec", "data_center", "price_cny_per_hour", "price_source")}}
@@ -133,8 +169,12 @@ class Steward:
 
     def release(self, instance_id: str) -> dict:
         self.vendor.release(instance_id)
-        self._log("release", instance=instance_id)
-        return {"done": "release", "id": instance_id}
+        out = {"done": "release", "id": instance_id}
+        try:
+            self._log("release", instance=instance_id)
+        except OSError as e:
+            out["ledger"] = f"not written ({e.strerror}): the instance IS released; record it by hand"
+        return out
 
     # ---- ensure ----
     def ensure(self, count: int, template: dict, *, specs=None, centers=None, yes: bool = False, patience: float = PATIENCE_S, delays=BACKOFF_S, boot_wait: float = BOOT_WAIT_S) -> dict:
@@ -179,7 +219,7 @@ class Steward:
             f = fails.setdefault((what, where, e.kind), {"what": what, "where": where, "kind": e.kind, "reason": e.message[:240], "tries": 0})
             f["tries"] += 1
 
-        pending, creating, waited, rnd = list(power_cands), True, 0.0, 0
+        pending, creating, waited, rnd, dead = list(power_cands), True, 0.0, 0, set()
         while need > 0:
             stock_miss = False
             for i in list(pending):
@@ -200,6 +240,8 @@ class Steward:
                 out["powered_on"].append(i.id)
                 need -= 1
             for s, c in combos if creating else []:
+                if (s, c) in dead:
+                    continue
                 while need > 0:
                     spec = {**template, "gpu_spec_uuid": s, **({"data_center_list": [c]} if c else {})}
                     spec.setdefault("start_command", START_COMMAND)
@@ -209,7 +251,9 @@ class Steward:
                         fail("create", f"{s}@{c or 'any'}", e)
                         if e.kind == "no_stock":
                             stock_miss = True
-                        elif e.kind in ("over_quota", "key_missing"):
+                        else:
+                            dead.add((s, c))                # refused for a reason waiting does not change: not tried again
+                        if e.kind in ("over_quota", "key_missing"):
                             creating = False                # the allowance, or a request the vendor refuses outright, is the same for every spec and place
                         break
                     out["created"].append(r)

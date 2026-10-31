@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import os
 import sys
 import tarfile
 from pathlib import Path
@@ -51,6 +52,13 @@ def instances(a, out=print) -> int:
         elif c == "ensure":
             return ensure_cmd(a, v, out)
         elif c in ("power-on", "power-off"):
+            if a.agent:
+                st0 = _steward(v, a)
+                mine = st0.ledger.created(v.name)
+                from .steward import pool_instances
+                if a.id not in mine and not (c == "power-on" and a.id in pool_instances(os.environ)):
+                    raise CloudGpuError("not_allowed", f"{a.id} is not a box this agent made" + (" or one wired in the settings" if c == "power-on" else "") + f": a person does {c} on it",
+                                        ["tell the person; the agent touches only its own boxes"])
             if not a.yes:
                 out(json.dumps({"dry_run": True, "would": c, "id": a.id, "next": [f"pass --yes (a person does) to {c}" + (": it starts the hourly billing" if c == "power-on" else "")]}))
                 return 0
@@ -137,6 +145,10 @@ def quota_cmd(a) -> int:
         if q.problem and not a.force:
             print(json.dumps({"error": q.problem, "next": ["chmod go-w the file, or pass --force to write a new one"]}))
             return 2
+        import math
+        if any(x is not None and not math.isfinite(x) for x in (a.max_cny_per_day, a.reserve_hours)):
+            print(json.dumps({"error": "the numbers must be finite"}))
+            return 2
         for field_, val in (("max_instances", a.max_instances), ("max_cny_per_day", a.max_cny_per_day), ("note", a.note), ("reserve_hours", a.reserve_hours)):
             if val is not None:
                 setattr(q, field_, val)
@@ -166,7 +178,7 @@ def _quota_view(env) -> dict:
     q = quota.load(env)
     led = quota.Ledger(quota.ledger_path(env))
     rows = led.rows()
-    return {**q.as_dict(), "agent_instances_now": sorted(led.created()), "spent_today_upper_bound_cny": round(quota.spent_today(rows, time.time()), 2),
+    return {**q.as_dict(), "instances_counted_against_the_allowance": sorted(led.created()), "create_outcomes_unknown": len(led.unresolved()), "spent_today_upper_bound_cny": round(quota.spent_today(rows, time.time()), 2),
             "quota_file": str(quota.quota_path(env)), "ledger_file": str(quota.ledger_path(env))}
 
 

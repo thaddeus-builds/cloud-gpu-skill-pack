@@ -89,7 +89,7 @@ def load(env: Mapping | None = None) -> Quota:
 def save(q: Quota, env: Mapping | None = None) -> Path:
     """Write the allowance (mode 0644, in a 0700 state directory) and a ledger line saying who and when."""
     p = quota_path(env)
-    p.parent.mkdir(parents=True, exist_ok=True)
+    p.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     tmp = p.with_name(p.name + ".tmp")
     tmp.write_text(json.dumps({k: v for k, v in q.as_dict().items() if k not in ("agent_may_create", "problem")}, ensure_ascii=False, indent=1), encoding="utf-8")
     os.chmod(tmp, 0o644)
@@ -105,7 +105,7 @@ class Ledger:
 
     def append(self, action: str, **fields) -> dict:
         row = {"at": time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(self.now())), "ts": round(self.now(), 1), "action": action, **fields}
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         fd = os.open(self.path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
         try:
             os.write(fd, (json.dumps(row, ensure_ascii=False) + "\n").encode("utf-8"))
@@ -140,6 +140,16 @@ class Ledger:
             elif r.get("action") in ("release", "gone") and i:
                 live.pop(i, None)
         return live
+
+    def unresolved(self, within_s: float = 86400) -> list[dict]:
+        """create-attempt rows (last `within_s`) that have neither a `create` nor a `create-failed` row of the same attempt: the vendor may have accepted them (a timeout after
+        the request went out) and an instance may be billing that nothing else records. They count against the allowance like a created instance."""
+        rows, done = self.rows(), set()
+        for r in rows:
+            if r.get("action") in ("create", "create-failed") and r.get("attempt"):
+                done.add(r["attempt"])
+        t = self.now() - within_s
+        return [r for r in rows if r.get("action") == "create-attempt" and r.get("attempt") not in done and float(r.get("ts") or 0) >= t]
 
     def all_creates(self) -> list[dict]:
         return [r for r in self.rows() if r.get("action") == "create"]

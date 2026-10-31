@@ -288,6 +288,10 @@ python3 -m cloudgpu instances ensure --count 2 --spec template.json [--specs v-4
   (`CLOUDGPU_ACTOR`, else `agent` or `person`). The attempt is written before the vendor is called, so a ledger that cannot be written stops a create instead of leaving a bill with no record.
 - **Release** by the agent needs three things: the ledger shows this agent created it (a box a person made is never released by the agent), it is shut down, and no setting wires it to a box
   (`CLOUDGPU_INSTANCE`, `CLOUDGPU_<NAME>_INSTANCE`: a take may be running there).
+- **A create whose answer was lost** (a timeout after the request went out) is kept in the ledger as an attempt with no outcome and counts as one instance and its reserve until a person looks
+  (`quota show` → `create_outcomes_unknown`; `instances list`). Creates and releases take a lock on the state directory, so two runs cannot both pass the same check. An instance the account
+  does not list is written `gone` only 15 minutes after it was created (a listing can lag). `power-on` and `power-off` with `--agent` touch only the agent's own boxes (`power-on` also the
+  ones wired in the settings, which are the operator's and not counted against the allowance: `ensure_up` powers those on by design).
 - **`ensure --count N`** (the verb "have N boxes up"): lists the account, counts the boxes this setup knows (the ones wired in the settings plus the ledger's) that are running, powers on the ones that
   are off and billed by the hour (a pass that is off may have ended: reported for a person to renew, not touched), then creates what is still missing, inside the allowance, from the template
   for each card spec in order (default `v-48g`, the 4090 48G; `CLOUDGPU_ENSURE_SPECS`) at each data center in order (default `westDC3,beijingDC2`; `CLOUDGPU_ENSURE_DATA_CENTERS`).

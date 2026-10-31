@@ -271,6 +271,97 @@ def test_a_power_on_with_no_free_card_is_retried_like_a_create():
         assert r["missing"] == 1 and slept == [5, 5] and r["failures"][0]["what"] == "power-on" and r["failures"][0]["kind"] == "no_stock" and r["failures"][0]["tries"] == 3
 
 
+def test_a_listing_that_lags_does_not_hide_a_new_box_or_lift_the_cap():
+    with _t.tmpdir() as d:
+        allow(d, instances=1, cny=1000)
+        cloud = FakeCloud(stock={("v-48g", "westDC3"): 9})
+        real_list = cloud.list
+        cloud.list = lambda **k: ([i for i in real_list()[0] if i.id != "pro-new1"], 1) if cloud.n == 1 else real_list()      # the new id is missing from the listing for a while
+        r = stew(d, cloud).ensure(3, TEMPLATE, specs=["v-48g"], centers=["westDC3"], yes=True)
+        assert len(r["created"]) == 1 and cloud.n == 1 and "gone" not in [x["action"] for x in quota.Ledger(quota.ledger_path(env_of(d))).rows()]
+
+
+def test_a_create_whose_answer_was_lost_still_counts_against_the_allowance():
+    with _t.tmpdir() as d:
+        allow(d, instances=1, cny=1000)
+        cloud = FakeCloud(stock={("v-48g", "westDC3"): 9})
+        cloud.errors[("v-48g", "westDC3")] = CloudGpuError("http", "autodl api create: timed out", status="network")
+        s = stew(d, cloud)
+        with _t.raises("http"):
+            s.create(spec())
+        del cloud.errors[("v-48g", "westDC3")]
+        with _t.raises("over_quota") as c:
+            s.create(spec())                                                                           # the lost one may be billing: it holds the only place
+        assert "not known" in c.err.message and cloud.n == 0
+        # a definite refusal, on the other hand, frees nothing and holds nothing
+        cloud.errors[("v-48g", "westDC3")] = CloudGpuError("http", "refused", status="X")
+        allow(d, instances=2, cny=1000)
+        with _t.raises("over_quota"):
+            s.create(spec())                                                                           # one place is still held by the lost one, one is free
+        assert len(s.ledger.unresolved()) == 1
+
+
+def test_two_creates_at_once_cannot_both_pass_the_same_check():
+    import threading
+    with _t.tmpdir() as d:
+        allow(d, instances=1, cny=1000)
+        cloud = FakeCloud(stock={("v-48g", "westDC3"): 9})
+        real = cloud.create
+        cloud.create = lambda sp: (time.sleep(0.2), real(sp))[1]
+        res = []
+
+        def go():
+            try:
+                res.append(stew(d, cloud).create(spec()))
+            except CloudGpuError as e:
+                res.append(e.kind)
+        ts = [threading.Thread(target=go) for _ in range(3)]
+        [t.start() for t in ts]
+        [t.join() for t in ts]
+        assert cloud.n == 1 and sorted(map(str, [type(x).__name__ for x in res])) == ["dict", "str", "str"]
+
+
+def test_a_ledger_that_cannot_be_written_after_a_release_is_said_not_raised():
+    with _t.tmpdir() as d:
+        allow(d)
+        cloud = FakeCloud(stock={("v-48g", "westDC3"): 1})
+        s = stew(d, cloud)
+        i = s.create(spec())["created"]
+        cloud.rows[i].status = "shutdown"
+        s._log = lambda *a, **k: (_ for _ in ()).throw(PermissionError(13, "Permission denied"))
+        r = s.release(i)
+        assert r["done"] == "release" and "IS released" in r["ledger"]
+
+
+def test_a_refusal_that_waiting_cannot_change_is_not_tried_again_each_round():
+    with _t.tmpdir() as d:
+        allow(d, instances=4, cny=1000)
+        cloud = FakeCloud(stock={})
+        cloud.errors[("v-48g", "bad")] = CloudGpuError("http", "bad request", status="X")
+        r = stew(d, cloud).ensure(1, TEMPLATE, specs=["v-48g"], centers=["bad", "westDC3"], yes=True, delays=(1, 1), patience=10)
+        assert [c[1] for c in cloud.calls if c[0] == "create"].count(("v-48g", "bad")) == 1
+
+
+def test_the_agent_powers_on_or_off_only_its_own_or_wired_boxes():
+    with _t.tmpdir() as d:
+        allow(d)
+        cloud = FakeCloud(instances=[Instance(id="pro-person", status="shutdown", billing="payg")])
+        os.environ["CLOUDGPU_STATE_DIR"] = d
+        from cloudgpu import vendors
+        reg = vendors.registry
+        vendors.registry = lambda: {"fakecloud": lambda env=None: cloud}
+        try:
+            for cmd in ("power-on", "power-off"):
+                buf = io.StringIO()
+                with redirect_stdout(buf):
+                    rc = cli.main(["instances", "--vendor", "fakecloud", cmd, "--agent", "--yes", "pro-person"])
+                assert rc == 1 and json.loads(buf.getvalue())["kind"] == "not_allowed"
+            assert not any(c[0] == "power_on" for c in cloud.calls)
+        finally:
+            vendors.registry = reg
+            os.environ.pop("CLOUDGPU_STATE_DIR", None)
+
+
 def test_autodl_no_stock_is_told_from_a_missing_balance_or_a_bad_token():
     v = va.AutoDL({"AUTODL_DEV_TOKEN": "x"})
     stock = CloudGpuError("http", "autodl api create: X 当前地区GPU库存不足", status="X")
@@ -279,6 +370,8 @@ def test_autodl_no_stock_is_told_from_a_missing_balance_or_a_bad_token():
     assert v.is_no_stock(CloudGpuError("http", "autodl api create: HTTP 401", status=401)) is False
     assert v.is_no_stock(CloudGpuError("http", "autodl api create: timed out", status="network")) is False
     assert v.is_no_stock(CloudGpuError("key_missing", "stock")) is False
+    for text in ("HTTP 403 not enough rights", "disk capacity must be <= 500", "insufficient funds", "insufficient parameter"):
+        assert v.is_no_stock(CloudGpuError("http", text, status="X")) is False, text
 
 
 def test_a_box_with_no_account_view_says_it_may_be_off_or_ended_and_who_can_help():

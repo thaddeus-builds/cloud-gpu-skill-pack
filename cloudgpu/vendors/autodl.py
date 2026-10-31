@@ -35,9 +35,9 @@ GPU_SPECS = {"h800": "H800-80G", "v-48g": "4090-48G", "pro6000-p": "PRO6000-96G"
              "6000d": "6000D-84G (seen on an instance; not in the appendix)"}
 DATA_CENTERS = {"westDC3": "northwest", "beijingDC2": "beijing"}
 PASS = ("daily", "weekly", "monthly")
-NO_STOCK_WORDS = ("stock", "insufficient", "sold out", "soldout", "no available", "not enough", "out of capacity", "capacity",
-                  "库存", "不足", "没有空闲", "无空闲", "无可用", "没有可用", "资源紧张", "售罄", "卡不够")
-NOT_STOCK_WORDS = ("balance", "余额", "欠费", "quota", "配额", "arrears", "unauthor", "token", "permission", "权限")      # "insufficient balance" is not a missing card
+NO_STOCK_WORDS = ("stocknotenough", "out of stock", "no stock", "sold out", "soldout", "no available gpu", "no gpu available", "no free gpu",
+                  "库存不足", "库存", "资源不足", "没有空闲", "无空闲", "无可用", "没有可用", "资源紧张", "售罄", "卡不够")
+NOT_STOCK_WORDS = ("balance", "余额", "欠费", "funds", "quota", "配额", "arrears", "unauthor", "forbidden", "rights", "token", "permission", "权限", "disk", "磁盘")      # a missing balance or right is not a missing card
 
 
 def _time(cell) -> str | None:

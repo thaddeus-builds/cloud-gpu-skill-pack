@@ -35,6 +35,9 @@ GPU_SPECS = {"h800": "H800-80G", "v-48g": "4090-48G", "pro6000-p": "PRO6000-96G"
              "6000d": "6000D-84G (seen on an instance; not in the appendix)"}
 DATA_CENTERS = {"westDC3": "northwest", "beijingDC2": "beijing"}
 PASS = ("daily", "weekly", "monthly")
+NO_STOCK_WORDS = ("stock", "insufficient", "sold out", "soldout", "no available", "not enough", "out of capacity", "capacity",
+                  "库存", "不足", "没有空闲", "无空闲", "无可用", "没有可用", "资源紧张", "售罄", "卡不够")
+NOT_STOCK_WORDS = ("balance", "余额", "欠费", "quota", "配额", "arrears", "unauthor", "token", "permission", "权限")      # "insufficient balance" is not a missing card
 
 
 def _time(cell) -> str | None:
@@ -135,6 +138,14 @@ class AutoDL(Vendor):
 
     def release(self, instance_id):
         self._call("POST", "release", {"instance_uuid": instance_id})
+
+    def is_no_stock(self, err):
+        """The API page lists no error codes (read 2026-10-31), so this is a reading of the words a refusal carries, not a documented code: a code or message that talks of stock,
+        shortage, or no free/available GPU or resource. An error that has none of them (a bad request, a missing token, a network failure) is not no-stock and is not retried."""
+        if err.kind != "http" or err.status == "network":
+            return False
+        text = f"{err.status} {err.message} {err.detail}".lower()
+        return not any(w in text for w in NOT_STOCK_WORDS) and any(w in text for w in NO_STOCK_WORDS)
 
     def gpu_specs(self):
         return dict(GPU_SPECS)

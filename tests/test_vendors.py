@@ -107,6 +107,7 @@ def run(argv):
 def test_the_cli_reads_freely_and_every_change_is_a_dry_run_until_yes():
     import os
     os.environ["AUTODL_DEV_TOKEN"] = "x"
+    os.environ["CLOUDGPU_STATE_DIR"] = _state = _t.tempfile.mkdtemp(prefix="cloudgpu-test-")          # the ledger of a person's --yes goes here, not to the home directory
     try:
         with api(answers) as calls:
             rc, d = run(["instances", "list"])
@@ -141,6 +142,8 @@ def test_the_cli_reads_freely_and_every_change_is_a_dry_run_until_yes():
             assert rc == 0 and d["done"] == "power-on" and calls[-1][1] == "power_on"
     finally:
         os.environ.pop("AUTODL_DEV_TOKEN", None)
+        os.environ.pop("CLOUDGPU_STATE_DIR", None)
+        _t.shutil.rmtree(_state, ignore_errors=True)
     rc, d = run(["instances", "list"])
     assert rc == 1 and d["kind"] == "key_missing" and "AUTODL_DEV_TOKEN" in d["error"]            # no token: told what to set, nothing called
 

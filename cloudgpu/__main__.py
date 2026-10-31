@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import os
 import sys
 import tarfile
 from pathlib import Path
@@ -48,36 +49,137 @@ def instances(a, out=print) -> int:
             out(json.dumps({"id": a.id, "status": v.status(a.id)}))
         elif c == "snapshot":
             out(json.dumps(v.snapshot(a.id), ensure_ascii=False))
+        elif c == "ensure":
+            return ensure_cmd(a, v, out)
         elif c in ("power-on", "power-off"):
+            if a.agent:
+                st0 = _steward(v, a)
+                mine = st0.ledger.created(v.name)
+                from .steward import pool_instances
+                if a.id not in mine and not (c == "power-on" and a.id in pool_instances(os.environ)):
+                    raise CloudGpuError("not_allowed", f"{a.id} is not a box this agent made" + (" or one wired in the settings" if c == "power-on" else "") + f": a person does {c} on it",
+                                        ["tell the person; the agent touches only its own boxes"])
             if not a.yes:
                 out(json.dumps({"dry_run": True, "would": c, "id": a.id, "next": [f"pass --yes (a person does) to {c}" + (": it starts the hourly billing" if c == "power-on" else "")]}))
                 return 0
             v.power_on(a.id) if c == "power-on" else v.power_off(a.id)
-            out(json.dumps({"done": c, "id": a.id}))
+            st, done = _steward(v, a), {"done": c, "id": a.id}
+            try:
+                st.ledger.append(c, vendor=v.name, instance=a.id, actor=st.actor, agent=bool(a.agent))
+            except OSError:
+                done["ledger"] = "not written"
+            out(json.dumps(done))
         elif c == "create":
             spec = json.loads(sys.stdin.read() if a.spec == "-" else Path(a.spec).read_text())
             problems = v.create_problems(spec)
             if problems:
                 out(json.dumps({"error": "the request is not one the vendor takes", "problems": problems}, ensure_ascii=False))
                 return 2
+            st = _steward(v, a)
             if not a.yes:
-                out(json.dumps({"dry_run": True, "would": "create", "request": spec, "next": ["pass --yes (a person does) to create: it STARTS BILLING at once"]}, ensure_ascii=False))
+                verdict = "the allowance covers it"
+                if a.agent:
+                    try:
+                        st.check_create(spec, st.sync(v.all()))
+                    except CloudGpuError as e:
+                        verdict = e.message
+                out(json.dumps({"dry_run": True, "would": "create", "request": spec, **({"allowance": verdict} if a.agent else {}),
+                                "next": ["pass --yes to create: it STARTS BILLING at once" + (" (inside the allowance)" if a.agent else " (a person does)")]}, ensure_ascii=False))
                 return 0
-            out(json.dumps({"created": v.create(spec), "next": ["python3 -m cloudgpu instances snapshot ID for the price and the SSH door"]}))
+            out(json.dumps({**st.create(spec), "next": ["python3 -m cloudgpu instances snapshot ID for the price and the SSH door"]}, ensure_ascii=False))
         elif c == "release":
             st = v.status(a.id)
             if st != "shutdown":
                 out(json.dumps({"error": f"the instance is {st}, not shutdown: power it off first", "id": a.id}))
                 return 2
+            st = _steward(v, a)
+            st.check_release(a.id, v.all() if a.agent else [])
             if not a.yes:
-                out(json.dumps({"dry_run": True, "would": "release", "id": a.id, "next": ["pass --yes (a person does) to release: it DESTROYS THE INSTANCE'S DATA"]}))
+                out(json.dumps({"dry_run": True, "would": "release", "id": a.id, "next": ["pass --yes to release: it DESTROYS THE INSTANCE'S DATA" + ("" if a.agent else " (a person does)")]}))
                 return 0
-            v.release(a.id)
-            out(json.dumps({"done": "release", "id": a.id}))
+            out(json.dumps(st.release(a.id)))
         return 0
     except CloudGpuError as e:
         out(json.dumps({"error": e.message, "kind": e.kind, "next": e.next, **({"status": e.status} if e.status is not None else {})}, ensure_ascii=False))
         return 1
+
+
+def _steward(v, a):
+    import os
+    from .steward import Steward
+    return Steward(v, os.environ, agent=bool(getattr(a, "agent", False)))
+
+
+def ensure_cmd(a, v, out) -> int:
+    """`instances ensure --count N --spec TEMPLATE`: up to N of the boxes this setup knows running, powered on or created inside the allowance; the report says how many and why not."""
+    import os
+    from . import config
+    from .steward import DEFAULT_CENTERS, DEFAULT_SPECS, Steward, csv
+    template = json.loads(sys.stdin.read() if a.spec == "-" else Path(a.spec).read_text())
+    template.pop("gpu_spec_uuid", None)
+    template.pop("data_center_list", None)
+    template.setdefault("req_gpu_amount", 1)
+    specs = csv(a.specs or config.get("ENSURE_SPECS"), DEFAULT_SPECS)
+    centers = csv(a.data_centers or config.get("ENSURE_DATA_CENTERS"), DEFAULT_CENTERS)
+    for s in specs:
+        problems = v.create_problems({**template, "gpu_spec_uuid": s, "data_center_list": centers})
+        if problems:
+            out(json.dumps({"error": "the request is not one the vendor takes", "problems": problems}, ensure_ascii=False))
+            return 2
+    st = Steward(v, os.environ, agent=True)
+    r = st.ensure(a.count, template, specs=specs, centers=centers, yes=a.yes, patience=a.patience)
+    out(json.dumps(r, ensure_ascii=False))
+    return 0 if not r["missing"] else 1
+
+
+def quota_cmd(a) -> int:
+    import os
+    from . import quota
+    from .errors import CloudGpuError
+    try:
+        if a.qcmd == "show":
+            st = _quota_view(os.environ)
+            print(json.dumps(st, ensure_ascii=False))
+            return 0
+        q = quota.load(os.environ)
+        if q.problem and not a.force:
+            print(json.dumps({"error": q.problem, "next": ["chmod go-w the file, or pass --force to write a new one"]}))
+            return 2
+        import math
+        if any(x is not None and not math.isfinite(x) for x in (a.max_cny_per_day, a.reserve_hours)):
+            print(json.dumps({"error": "the numbers must be finite"}))
+            return 2
+        for field_, val in (("max_instances", a.max_instances), ("max_cny_per_day", a.max_cny_per_day), ("note", a.note), ("reserve_hours", a.reserve_hours)):
+            if val is not None:
+                setattr(q, field_, val)
+        if a.price:
+            q.prices = {**q.prices, **quota.parse_price(a.price)}
+        q.problem, q.set_by, q.set_at = "", a.by, time_now()
+        if q.max_instances < 0 or q.max_cny_per_day < 0:
+            print(json.dumps({"error": "the numbers cannot be negative"}))
+            return 2
+        p = quota.save(q, os.environ)
+        quota.Ledger(quota.ledger_path(os.environ)).append("quota-set", actor=a.by, agent=False, **{k: v for k, v in q.as_dict().items() if k != "agent_may_create"})
+        print(json.dumps({**q.as_dict(), "file": str(p), "next": [f"chmod go-w {p}; keep it out of the agent's reach (docs, 'An allowance for an agent')"]}, ensure_ascii=False))
+        return 0
+    except CloudGpuError as e:
+        print(json.dumps({"error": e.message, "kind": e.kind}, ensure_ascii=False))
+        return 2
+
+
+def time_now() -> str:
+    import time
+    return time.strftime("%Y-%m-%dT%H:%M:%S%z")
+
+
+def _quota_view(env) -> dict:
+    import time
+    from . import quota
+    q = quota.load(env)
+    led = quota.Ledger(quota.ledger_path(env))
+    rows = led.rows()
+    return {**q.as_dict(), "instances_counted_against_the_allowance": sorted(led.created()), "create_outcomes_unknown": len(led.unresolved()), "spent_today_upper_bound_cny": round(quota.spent_today(rows, time.time()), 2),
+            "quota_file": str(quota.quota_path(env)), "ledger_file": str(quota.ledger_path(env))}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -96,9 +198,29 @@ def main(argv: list[str] | None = None) -> int:
         q.add_argument("id")
         if c in ("power-on", "power-off", "release"):
             q.add_argument("--yes", action="store_true")
+            q.add_argument("--agent", action="store_true", help="an agent's call: release only touches an instance this agent created (ledger)")
     q = isub.add_parser("create")
     q.add_argument("--spec", required=True, help="a JSON file of the vendor's create request, or - for stdin")
     q.add_argument("--yes", action="store_true")
+    q.add_argument("--agent", action="store_true", help="an agent's call: refused unless the allowance (quota set) covers it")
+    q = isub.add_parser("ensure", help="have N boxes up: power on the ones that are off, create what is missing inside the allowance, retry when no card is free, report what failed")
+    q.add_argument("--count", type=int, required=True)
+    q.add_argument("--spec", required=True, help="a JSON file of the create request WITHOUT the card spec and data center (they come from --specs and --data-centers), or - for stdin")
+    q.add_argument("--specs", help="card specs in order of preference, comma separated (default: CLOUDGPU_ENSURE_SPECS, else v-48g = 4090 48G)")
+    q.add_argument("--data-centers", help="data centers in order, comma separated (default: CLOUDGPU_ENSURE_DATA_CENTERS, else westDC3,beijingDC2)")
+    q.add_argument("--patience", type=float, default=600, help="seconds to keep trying when no card is in stock (default 600)")
+    q.add_argument("--yes", action="store_true", help="do it; without it the plan is printed and nothing changes")
+    qs = sub.add_parser("quota", help="the allowance an agent may rent boxes inside: show (free), set (a person; records who and when)")
+    qsub = qs.add_subparsers(dest="qcmd", required=True)
+    qsub.add_parser("show")
+    qq = qsub.add_parser("set")
+    qq.add_argument("--by", required=True, help="who sets it (recorded with the time)")
+    qq.add_argument("--max-instances", type=int)
+    qq.add_argument("--max-cny-per-day", type=float)
+    qq.add_argument("--price", action="append", default=[], help="SPEC=CNY_PER_HOUR the allowance assumes, repeatable (v-48g=3.2)")
+    qq.add_argument("--reserve-hours", type=float)
+    qq.add_argument("--note")
+    qq.add_argument("--force", action="store_true")
     ho = sub.add_parser("hold", help="hold a box for a time so no take starts on it (Pool.take waits or uses another box); ends by itself")
     ho.add_argument("box", help="the box's name in CLOUDGPU_POOL, or default for a pool of one")
     ho.add_argument("--minutes", type=float, required=True)
@@ -117,6 +239,8 @@ def main(argv: list[str] | None = None) -> int:
     a, rest = ap.parse_known_args(argv)
     if a.cmd == "instances":
         return instances(a)
+    if a.cmd == "quota":
+        return quota_cmd(a)
     if a.cmd == "status":
         from . import config
         from .status import status

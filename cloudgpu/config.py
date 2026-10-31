@@ -9,7 +9,7 @@ from collections.abc import Mapping
 from pathlib import Path
 
 PREFIXES = ("CLOUDGPU_", "H3HOST_")
-NAMES = ("BASE", "TOKEN", "BOX", "SSH_KEY", "SSH", "KNOWN_HOSTS", "REMOTE_PORT", "POWER", "INSTANCE", "AUTOOFF")       # AUTODL_DEV_TOKEN is the autodl backend's own
+NAMES = ("BASE", "TOKEN", "BOX", "SSH_KEY", "SSH", "KNOWN_HOSTS", "REMOTE_PORT", "POWER", "INSTANCE", "AUTOOFF", "QUOTA_FILE", "LEDGER_FILE", "ACTOR", "ENSURE_SPECS", "ENSURE_DATA_CENTERS")       # AUTODL_DEV_TOKEN is the autodl backend's own
 
 
 def get(name: str, env: Mapping | None = None) -> str | None:

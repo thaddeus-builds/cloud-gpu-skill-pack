@@ -96,6 +96,11 @@ class Vendor:
         """Release (delete) an instance. DESTROYS ITS DATA."""
         self._no("release")
 
+    def is_no_stock(self, err: CloudGpuError) -> bool:
+        """True when `err` (from create or power_on) means the vendor has no free card of that spec in that place right now, as opposed to a refusal that retrying cannot fix
+        (a bad request, no balance, no token). A vendor that does not know says False: the failure is then reported as it came, and not retried."""
+        return False
+
     def gpu_specs(self) -> dict[str, str]:
         """The vendor's card spec ids and what the vendor's page calls them."""
         return {}

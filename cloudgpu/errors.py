@@ -5,7 +5,9 @@ from __future__ import annotations
 
 class CloudGpuError(Exception):
     """`kind`: key_missing (a variable or a file is not set right), http (a vendor API or the box answered no), unknown (a name that is no
-    backend), down (the box does not answer and nothing can turn it on), timeout (it did not come up). `next`: what a person can do."""
+    backend), down (the box does not answer and nothing can turn it on), timeout (it did not come up),
+    no_stock (the vendor has no free card of that spec in that place now: try another, or later), over_quota (the allowance a person gave the agent does not cover it),
+    not_allowed (the agent may not do that to that instance: a person's box). `next`: what a person can do."""
 
     def __init__(self, kind: str, message: str, next: list[str] | None = None, *, status=None, detail: str = ""):
         super().__init__(message)

@@ -19,6 +19,9 @@ from .vendors import Vendor
 HOURLY_BILLING = "payg"                             # autodl's charge_type of a box paid by the hour: the only one that is ever powered off to save money
 PASS_BILLING = ("daily", "weekly", "monthly")      # autodl's charge_type of a pass: paid whether the card works or not
 DEFAULT_BACKEND = "autodl"
+NO_ACCOUNT_HINT = ("with CLOUDGPU_POWER=none this package has no view of the cloud account, so it cannot tell a box that is switched off from one whose pass has ended or that was released. "
+                   "To see which, and to start it, set AUTODL_DEV_TOKEN (the account's developer token: console -> account -> settings) and CLOUDGPU_INSTANCE (the pro-... number) "
+                   "and unset CLOUDGPU_POWER; the person who rents the box (the account holder) has them and gives them to whoever runs this, never in chat")
 
 
 class Power:
@@ -36,8 +39,9 @@ class Power:
 
     def power_on(self, start_command: str) -> None:
         """Turn the box on; `start_command` (a path on the box) is run after boot where the vendor supports it. CloudGpuError when it cannot."""
-        raise CloudGpuError("down", "the box does not answer and the power backend cannot turn it on",
-                            ["start the box at its vendor", "or set CLOUDGPU_POWER and the backend's variables (docs/cloud-gpu.md, 'Power')"],
+        raise CloudGpuError("down", "the box does not answer: it may be switched off or its pass may have ended (or it was released), and " + NO_ACCOUNT_HINT,
+                            ["the account holder looks at the box in the vendor's console: if it is off, start it; if it ended, renew it or rent another",
+                             "or give this process the account token and instance id (docs/cloud-gpu.md, 'Power'), so the status is read and a box that is off is started"],
                             detail=self.name)
 
     def power_off(self) -> bool:

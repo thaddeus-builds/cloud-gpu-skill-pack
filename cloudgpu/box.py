@@ -16,7 +16,7 @@ from collections.abc import Mapping
 
 from . import config, files, line, net, tunnel
 from .errors import CloudGpuError
-from .power import HOURLY_BILLING, Power, backend
+from .power import HOURLY_BILLING, NO_ACCOUNT_HINT, Power, backend
 
 START_COMMAND = "/root/h3host/start.sh"          # a path on the box: written by onbox/install.sh (its folder is ~/h3host); a vendor's power-on hook runs it
 UP_TIMEOUT_S = 900                               # power on, the vendor's own boot, ComfyUI up
@@ -160,8 +160,8 @@ class Box:
                 end = time.time() + UP_TIMEOUT_S
                 while not (h and h.get("comfy")):
                     if time.time() > end:
-                        raise CloudGpuError("timeout", f"the box did not come up in {UP_TIMEOUT_S}s", ["look at the box at its vendor; nothing was sent"],
-                                            detail=pw.name)
+                        raise CloudGpuError("timeout", f"the box did not come up in {UP_TIMEOUT_S}s" + ("" if pw.configured() else "; " + NO_ACCOUNT_HINT),
+                                            ["look at the box at its vendor; nothing was sent"], detail=pw.name)
                     self._sleep(10)
                     self.tunnel()                            # the door may have moved while it booted
                     h = self.health()

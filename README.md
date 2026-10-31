@@ -17,6 +17,7 @@ tests/              python3 tests/run.py (offline: a fake ComfyUI stands in for 
 ```
 python3 -m cloudgpu status          # where the box stands, read only
 python3 -m cloudgpu instances list  # the cloud account (autodl): list, status, snapshot; power, create, release only with --yes
+python3 -m cloudgpu quota show      # the allowance an agent may rent boxes inside (0 until a person sets it); instances ensure --count N
 python3 -m cloudgpu hold BOX --minutes 60 --who NAME   # keep takes off a box for a while (release BOX ends it)
 python3 -m cloudgpu bundle          # cloudgpu-box.tgz: what to copy onto a box
 python3 -m cloudgpu price --box rtx4090 --format tsv

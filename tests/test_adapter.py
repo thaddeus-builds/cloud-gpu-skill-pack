@@ -435,6 +435,28 @@ def test_health_says_the_free_memory_comfyui_reports_and_null_when_it_does_not()
             b.close()
 
 
+def test_landscape_resolutions_swap_the_sides_for_every_workflow_and_the_default_ref_prompt_is_not_vertical():
+    assert adapter.RESOLUTIONS["480p横"] == (864, 480) and adapter.RESOLUTIONS["768p横"] == (1344, 768)
+    for v, h in (("480p竖", "480p横"), ("768p竖", "768p横")):
+        assert adapter.RESOLUTIONS[v] == adapter.RESOLUTIONS[h][::-1]
+    with _t.tmpdir() as d:
+        b = Box(d)
+        try:
+            for wf, body, want in (("minimax_h3_lightx2v", {**FL, "resolution": "768p横"}, (1344, 768)),
+                                   ("minimax_h3_lightx2v", {**FL, "resolution": "480p横"}, (864, 480)),
+                                   ("minimax_h3_t2v", {"prompt": "A street.", "duration": 4, "resolution": "768p横"}, (1344, 768)),
+                                   ("minimax_h3_image_audio_to_video", {**REF, "resolution": "480p横"}, (864, 480))):
+                tid = b.call("POST", f"{API}/{wf}", body)[1]["data"]["task_id"]
+                assert b.wait(tid)["status"] == "SUCCESS", wf
+                i = b.comfy.graphs[-1]["7"]["inputs"]
+                assert (i["width"], i["height"]) == want, (wf, want)
+                if wf == "minimax_h3_image_audio_to_video":
+                    assert "wide screen video" in i["prompt"] and "vertical" not in i["prompt"]
+            assert b.call("POST", f"{API}/minimax_h3_lightx2v", {**FL, "resolution": "1080p横"})[0] == 400      # still refused
+        finally:
+            b.close()
+
+
 def test_text_to_video_needs_only_a_prompt_and_a_duration_and_builds_the_fl2va_graph_with_no_frames():
     with _t.tmpdir() as d:
         b = Box(d)

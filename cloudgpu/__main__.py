@@ -1,4 +1,4 @@
-"""python3 -m cloudgpu COMMAND: status and util (read only), hold / release (a person's hold on a box), instances (the cloud account: list, status, snapshot read; power, create, release only with --yes), price, bench (a paid take), bundle (what to copy onto a box)."""
+"""python3 -m cloudgpu COMMAND: status and util (read only), hold / release (a person's hold on a box), instances (the cloud account: list, status, snapshot, expiry read; power, create, release only with --yes), price, bench (a paid take), bundle (what to copy onto a box)."""
 
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ def bundle(out: str) -> list[str]:
 def instances(a, out=print) -> int:
     """The cloud account's instances. Reading (list, status, snapshot, specs) is free. Anything that changes the account (power-on, power-off, create, release) prints what it
     would do and stops unless `--yes` is given: a person gives it; create STARTS BILLING and release DESTROYS THE INSTANCE'S DATA. No secret is ever printed."""
-    from . import config, vendors
+    from . import config, expiry, vendors
     from .errors import CloudGpuError
     name = a.vendor or config.get("VENDOR") or (config.get("POWER") if config.get("POWER") not in (None, "none") else None) or "autodl"
     try:
@@ -44,9 +44,26 @@ def instances(a, out=print) -> int:
         if not v.configured() and c != "create":
             raise CloudGpuError("key_missing", f"the {name} vendor needs {v.token_env}")
         if c == "list":
-            out(json.dumps([i.as_dict() for i in v.all()], ensure_ascii=False))
+            listing = v.all()
+            prow = {r["id"]: r for r in expiry.rows(listing, vendor=v.name, days=_days(a))}
+            out(json.dumps([{**i.as_dict(), **({"pass": prow[i.id]} if i.id in prow else {})} for i in listing], ensure_ascii=False))
+            _say(expiry.alerts(prow.values()))
+        elif c == "expiry":
+            rs = expiry.account_rows(v, only=set(a.ids) or None, days=_days(a))
+            doc = {"warn_days": _days(a), "level": expiry.worst(rs), "passes": rs, "alerts": [r["message"] for r in expiry.alerts(rs)]}
+            lost = sorted(set(a.ids) - {r["id"] for r in rs})        # a named id that is no pass: a typo, an hourly box, or a pass the vendor dropped after it ended
+            for i in lost:
+                doc["alerts"].append(f"{i} is not a pass of this account (a mistyped id, a box paid by the hour, or a pass the vendor no longer lists): check it in the console")
+            out(json.dumps({**doc, **({"level": "warn"} if lost and doc["level"] in ("ok", "info") else {}), "not_passes": lost}, ensure_ascii=False))
+            return 1 if lost and expiry.worst(rs) != "error" else {"ok": 0, "info": 0, "warn": 1, "error": 2}[expiry.worst(rs)]
         elif c == "status":
-            out(json.dumps({"id": a.id, "status": v.status(a.id)}))
+            doc = {"id": a.id, "status": v.status(a.id)}
+            try:                                                    # a pass's end: one more read of the account; the status stands without it
+                r = next(iter(expiry.rows([i for i in [v.get(a.id)] if i], vendor=v.name, days=_days(a))), None)
+            except CloudGpuError:
+                r = None
+            out(json.dumps({**doc, **({"pass": r} if r else {})}, ensure_ascii=False))
+            _say(expiry.alerts([r]) if r else [])
         elif c == "snapshot":
             out(json.dumps(v.snapshot(a.id), ensure_ascii=False))
         elif c == "ensure":
@@ -102,6 +119,25 @@ def instances(a, out=print) -> int:
     except CloudGpuError as e:
         out(json.dumps({"error": e.message, "kind": e.kind, "next": e.next, **({"status": e.status} if e.status is not None else {})}, ensure_ascii=False))
         return 1
+
+
+def _days(a) -> float:
+    """--warn-days when given (it must be a number above 0, as the setting must), else the setting."""
+    import math
+    from . import expiry
+    from .errors import CloudGpuError
+    d = getattr(a, "warn_days", None)
+    if d is None:
+        return expiry.warn_days()
+    if not (math.isfinite(d) and d > 0):
+        raise CloudGpuError("unknown", "--warn-days must be a number of days above 0")
+    return d
+
+
+def _say(alerts) -> None:
+    """A pass that ends soon or has ended, one line each on stderr (stdout stays the JSON): the person reading the terminal sees it, a parser is not disturbed."""
+    for r in alerts:
+        print(f"{r['level'].upper()}: {r['message']}", file=sys.stderr)
 
 
 def _steward(v, a):
@@ -194,11 +230,17 @@ def main(argv: list[str] | None = None) -> int:
     ins = sub.add_parser("instances", help="the cloud account: list, status, snapshot, specs (read); power-on, power-off, create, release (only with --yes)")
     ins.add_argument("--vendor", help="a cloud vendor (default: CLOUDGPU_VENDOR, CLOUDGPU_POWER, else autodl)")
     isub = ins.add_subparsers(dest="icmd", required=True)
-    isub.add_parser("list")
+    il = isub.add_parser("list", help="every instance; a pass carries its end and a warning when it ends soon or has ended")
+    il.add_argument("--warn-days", type=float, help="warn this many days before a pass ends (default CLOUDGPU_PASS_WARN_DAYS, else 3)")
+    ie = isub.add_parser("expiry", help="the passes (daily, weekly, monthly) and when each ends; exit 0 all well, 1 one ends soon, 2 one has ended")
+    ie.add_argument("ids", nargs="*", help="only these instances (default: every pass of the account)")
+    ie.add_argument("--warn-days", type=float, help="warn this many days before a pass ends (default CLOUDGPU_PASS_WARN_DAYS, else 3)")
     isub.add_parser("specs")
     for c in ("status", "snapshot", "power-on", "power-off", "release"):
         q = isub.add_parser(c)
         q.add_argument("id")
+        if c == "status":
+            q.add_argument("--warn-days", type=float, help="as for list")
         if c in ("power-on", "power-off", "release"):
             q.add_argument("--yes", action="store_true")
             q.add_argument("--agent", action="store_true", help="an agent's call: release only touches an instance this agent created (ledger)")

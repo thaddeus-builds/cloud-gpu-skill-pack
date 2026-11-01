@@ -64,8 +64,9 @@ def status(env: Mapping | None = None, envfile: str | None = None) -> dict:
             acc = {"backend": pw.name, "error": e.message[:200]}
         out["account"] = acc
         if acc.get("billing") in PASS_BILLING:
-            if acc.get("hours_left", 1) < 0:
-                nxt.append("the pass has ended: renew it at the vendor")
+            ex = acc.get("expiry")
+            if ex and ex["level"] != "ok":
+                nxt.append(ex["message"])
             if config.flag("AUTOOFF", box.env):
                 nxt.append("CLOUDGPU_AUTOOFF is set on a pass: powering off saves nothing there (a pass is left on), unset it")
     elif pw is not None and health is None and reach_ok and pw.name == "none":

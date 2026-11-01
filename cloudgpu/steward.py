@@ -17,7 +17,7 @@ import time
 import uuid
 from collections.abc import Mapping
 
-from . import config, quota
+from . import config, expiry, quota
 from .errors import CloudGpuError
 from .vendors import Vendor
 
@@ -179,7 +179,7 @@ class Steward:
     # ---- ensure ----
     def ensure(self, count: int, template: dict, *, specs=None, centers=None, yes: bool = False, patience: float = PATIENCE_S, delays=BACKOFF_S, boot_wait: float = BOOT_WAIT_S) -> dict:
         """Have `count` of the boxes this setup knows (the ledger's, and the ones wired in the settings) running. Order: instances already running count; then those that are off and
-        billed by the hour are powered on (a pass that is off is a person's to renew); then, inside the allowance, new ones are created from `template` for each card spec in `specs`,
+        billed by the hour, or a pass that has not ended, are powered on (a pass that has ended is a person's to renew); then, inside the allowance, new ones are created from `template` for each card spec in `specs`,
         in order, at each data center in `centers`, in order. A card that is not in stock is tried again after a pause (`delays`, at most `patience` seconds in all); every other
         failure is reported once and not retried. Without `yes` nothing is changed: the plan is returned. The result says how many are up, how many are missing, and each failure's reason."""
         specs = list(specs or DEFAULT_SPECS)
@@ -190,15 +190,17 @@ class Steward:
         have = [i for i in listing if i.id in known]
         running = [i.id for i in have if i.status == "running"]
         off = [i for i in have if i.status in OFF_STATUS]
-        pass_off = [i.id for i in off if i.billing != "payg"]
-        power_cands = [i for i in off if i.billing == "payg"]
+        prows = expiry.rows(have, self.now(), expiry.warn_days(self.env), self.vendor.name)
+        by_id = {r["id"]: r for r in prows}
+        pass_alive = [i for i in off if by_id.get(i.id, {}).get("state") in ("off", "expiring")]      # switched off, the pass still runs: powering it on costs nothing extra
+        pass_off = [i.id for i in off if i.billing != "payg" and i not in pass_alive]                 # ended, or no end time given: a person looks
+        power_cands = pass_alive + [i for i in off if i.billing == "payg"]
         unclear = [{"id": i.id, "status": i.status} for i in have if i.status != "running" and i.status not in OFF_STATUS]
         need = max(0, count - len(running))
         combos = [(s, c) for s in specs for c in (centers or [None])]
-        out: dict = {"wanted": count, "running": running, "powered_on": [], "created": [], "failures": [], "unclear": unclear}
-        notes: list[str] = []
-        if pass_off:
-            notes.append(f"{', '.join(pass_off)} is off and billed as a pass (not by the hour): it may have ended; a person renews it at the vendor")
+        out: dict = {"wanted": count, "running": running, "powered_on": [], "created": [], "failures": [], "unclear": unclear, "passes": prows}
+        notes: list[str] = [r["message"] for r in expiry.alerts(prows) if r["id"] not in pass_off and r["state"] != "off"]      # a pass that ends soon, running or not
+        notes += [by_id[i]["message"] if i in by_id else f"{i} is off and billed as a pass (not by the hour): a person looks at it in the vendor's console" for i in pass_off]
         if unclear:
             notes.append("an instance in a state this package does not know is neither counted nor touched: look at it with `instances snapshot ID`")
         if not yes:

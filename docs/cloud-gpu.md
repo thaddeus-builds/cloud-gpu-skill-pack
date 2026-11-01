@@ -76,6 +76,7 @@ CLOUDGPU_VENDOR=...         the vendor `instances` talks to when CLOUDGPU_POWER 
 CLOUDGPU_KNOWN_HOSTS=...    a file with the box's SSH host key: the tunnel then trusts nothing on first use (default: accept-new)
 CLOUDGPU_AUTOOFF=1          power the box off when the process ends, if THIS process powered it on, no take waits on it and the box is billed by the hour (1/true/yes/on; 0, off or empty is off)
 CLOUDGPU_INSTANCE=pro-…     the instance the power backend powers (autodl ids look like pro-…)
+CLOUDGPU_PASS_WARN_DAYS=3   warn this many days before a pass (daily, weekly, monthly) ends (default 3; 'Passes', below)
 AUTODL_DEV_TOKEN=…          the autodl backend: the account's developer token (console -> account -> settings), not the workflow token
 ```
 
@@ -256,6 +257,36 @@ stays "no such call": said, never guessed), the normalising of its answers into 
 test it offline against the documented answers (copy `tests/test_vendors.py`). The power backend, the CLI, the status check and the skill then work for it with no other change.
 A vendor with no API at all needs nothing: `CLOUDGPU_POWER=none`. A call never runs a command taken from a file or the environment.
 
+### Passes: the base, and the warning before one ends (0.16.0)
+
+The base capacity is **passes** (daily, weekly or monthly boxes) that **a person buys and renews in the vendor's console**; this package cannot do either (autodl's API only creates pay-as-you-go
+instances). Boxes an agent makes through the API are hourly, a temporary addition. The whole operating model, and who does what, is in `docs/how-to-run-boxes.md`.
+
+What the package does for a pass is notice and name it (`cloudgpu/expiry.py`). For every instance billed `daily`, `weekly` or `monthly` it works out the time left from the account's `expired_at`
+(read with its own offset, not the machine's) and gives a state:
+
+| state | level | meaning | who |
+|---|---|---|---|
+| `expired` | error | the pass has ended | a person renews it in the console; powering on will not help |
+| `expiring` | warn | ends in less than `CLOUDGPU_PASS_WARN_DAYS` (default **3**; fractions allowed; a bad value is 3) | a person renews it before then |
+| `no_end` | warn | the account gave no end time, so it cannot be watched | a person looks in the console |
+| `off` | info | switched off, the pass runs on | power it on (`instances power-on ID --yes`, or `ensure` does it); nothing to renew |
+| `active` | ok | nothing to say | |
+
+A pay-as-you-go instance never has a state: it has no end. Each message names the instance (id and name), the end time, and who acts. Where it shows:
+
+- `python3 -m cloudgpu instances list` still prints the same JSON list, with a `pass` object on each pass; the warnings are lines on stderr (`WARN: ...`, `ERROR: ...`). `--warn-days N` overrides the setting.
+- `python3 -m cloudgpu instances status ID` adds the same `pass` for that instance.
+- `python3 -m cloudgpu instances expiry [ID ...] [--warn-days N]` is the check for a script or a cron: every pass of the account (or the ones named), `level`, `alerts`; **exit 0** well (or only `off`),
+  **1** one ends soon, **2** one has ended.
+- `python3 -m cloudgpu status` (the box wired in the settings) puts the message in `next` and the whole row in `account.expiry`.
+- `instances ensure` puts a message in `next` for every wired pass that ends soon or has ended, and the rows in `passes`. A pass that is off and has not ended is powered on before any hourly box
+  (it costs nothing more); one that has ended or gives no end time is left to a person.
+- A consumer's health check calls `expiry.account_rows(vendor, env, only=wired_ids)` and shows each row's `message` (the `level` says error or warning); `only` keeps a pass nobody uses from nagging.
+
+Nothing here sends a message: whoever runs `status`, `ensure`, `instances expiry` (a person, or an agent that tells a person) sees the line. A cron that runs `instances expiry` and tells the account
+holder on a non-zero exit is the way to be told without asking.
+
 ### A line across machines (0.7.0)
 
 Callers on different machines cannot see each other's tickets, so each used to see a free box and send; the second waited inside the adapter's queue, unable to go to another box. The box now keeps the line
@@ -330,7 +361,7 @@ python3 -m cloudgpu instances ensure --count 2 --spec template.json [--specs v-4
   does not list is written `gone` only 15 minutes after it was created (a listing can lag). `power-on` and `power-off` with `--agent` touch only the agent's own boxes (`power-on` also the
   ones wired in the settings, which are the operator's and not counted against the allowance: `ensure_up` powers those on by design).
 - **`ensure --count N`** (the verb "have N boxes up"): lists the account, counts the boxes this setup knows (the ones wired in the settings plus the ledger's) that are running, powers on the ones that
-  are off and billed by the hour (a pass that is off may have ended: reported for a person to renew, not touched), then creates what is still missing, inside the allowance, from the template
+  are off and billed by the hour, or are a pass that has not ended (a pass that has ended is reported for a person to renew, not touched), then creates what is still missing, inside the allowance, from the template
   for each card spec in order (default `v-48g`, the 4090 48G; `CLOUDGPU_ENSURE_SPECS`) at each data center in order (default `westDC3,beijingDC2`; `CLOUDGPU_ENSURE_DATA_CENTERS`).
   **A card that is not in stock** is tried again after 20, 40, 80, 160, 300 seconds (at most `--patience` in all); every other failure (no balance, a refused request, the allowance) is
   reported once and not retried. The AutoDL API page lists no error codes, so "no stock" is read from the words of the refusal (stock, insufficient, no available, 库存 ... but not balance or

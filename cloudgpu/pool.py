@@ -276,6 +276,9 @@ class Pool:
                 elif not self._ahead(tk, name) and (not self._first_on(tk, name) or self._line(box, name, lines, label)) and (tk is None or tk.run(hold.box_key(name), self.depth)):
                     break
                 self._sleep(self.poll)
+            if name:                                                   # a named box says so in the take's folder; a plain unnamed box writes none
+                out_dir.mkdir(parents=True, exist_ok=True)
+                pin.write_text(name, encoding="utf-8")
             try:
                 with self._running(name, lines):
                     yield box

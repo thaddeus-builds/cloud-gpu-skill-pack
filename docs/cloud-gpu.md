@@ -161,7 +161,7 @@ with pool.take(out_dir, sent=lambda d: (d / "task_id").exists()) as box:
 ```
 
 A take waits for the first box in the list that is not making another take (a box makes one at a time) and comes up (`Box.ensure_up`). A box that fails to come up is tried again after a
-minute; every box down with none busy raises the last box's `CloudGpuError` instead of waiting for ever. The choice is written to the take's folder, and a take the caller says was sent
+minute; every box down with none busy raises the last box's `CloudGpuError` instead of waiting for ever. The choice is written to the take's folder (also by a pool of one named box, `CLOUDGPU_POOL=b`; a plain unnamed box writes none), and a take the caller says was sent
 earlier runs on the box that holds it and on no other: only that box can give its result back. Threads of one process share one pool, so with two boxes two takes run at once.
 
 ### A person's hold on a box (0.4.0)

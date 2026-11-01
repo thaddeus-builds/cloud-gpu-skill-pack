@@ -36,6 +36,7 @@ class FakeComfy:
 
     def __init__(self, root: Path, mode="ok"):
         self.root, self.mode, self.graphs, self.done, self.calls = root, mode, [], {}, []
+        self.stats = {"system": {}}
         outer = self
 
         class H(BaseHTTPRequestHandler):
@@ -51,7 +52,7 @@ class FakeComfy:
 
             def do_GET(self):
                 if self.path == "/system_stats":
-                    return self._j(200, {"system": {}})
+                    return self._j(200, outer.stats)
                 if self.path.startswith("/history/"):
                     pid = self.path.rsplit("/", 1)[-1]
                     return self._j(200, {pid: outer.done[pid]} if pid in outer.done else {})
@@ -96,11 +97,11 @@ class FakeComfy:
 class Box:
     """A running adapter over a temp folder and a FakeComfy."""
 
-    def __init__(self, d: str, mode="ok", tts=None):
+    def __init__(self, d: str, mode="ok", tts=None, **host_kw):
         self.root = Path(d) / "comfy"
         (self.root / "input").mkdir(parents=True)
         self.comfy = FakeComfy(self.root, mode)
-        self.host = adapter.Host(TOKEN, self.comfy.url, Path(d) / "state", self.root, tts=tts)
+        self.host = adapter.Host(TOKEN, self.comfy.url, Path(d) / "state", self.root, tts=tts, **host_kw)
         self.host.start_worker()
         self.srv = adapter.ThreadingHTTPServer(("127.0.0.1", 0), adapter.handler(self.host))
         self.base = f"http://127.0.0.1:{self.srv.server_address[1]}"
@@ -325,6 +326,111 @@ def test_mode_a_builds_the_fl2va_graph_with_the_still_as_first_and_last_frame():
             assert g["5"]["inputs"]["image"] == g["5b"]["inputs"]["image"]
             assert g["9"]["inputs"]["noise_seed"] == 7 and g["7"]["inputs"]["prompt"] == "She says: hello."
             assert "6" not in g                                    # H3 speaks: no audio input
+        finally:
+            b.close()
+
+
+def frees(b) -> int:
+    return b.comfy.calls.count("/free")
+
+
+def settle(cond, timeout=10):
+    end = time.time() + _t.patient(timeout)
+    while time.time() < end and not cond():
+        time.sleep(0.05)
+    return cond()
+
+
+def test_comfyui_is_asked_to_free_its_memory_after_a_take_only_when_nothing_else_is_accepted_or_queued():
+    with _t.tmpdir() as d:
+        b = Box(d)
+        try:
+            gate, started = threading.Event(), threading.Event()
+            real = b.host.run
+
+            def slow(t):
+                started.set()
+                gate.wait(20)
+                return real(t)
+            b.host.run = slow
+            t1 = b.call("POST", f"{API}/minimax_h3_lightx2v", FL)[1]["data"]["task_id"]
+            assert started.wait(10)
+            t2 = b.call("POST", f"{API}/minimax_h3_lightx2v", FL)[1]["data"]["task_id"]      # accepted while the first one runs
+            b.host.run = real
+            gate.set()
+            assert b.wait(t1)["status"] == "SUCCESS" and b.wait(t2)["status"] == "SUCCESS"
+            assert settle(lambda: frees(b) >= 1)
+            time.sleep(0.3)
+            assert frees(b) == 1, b.comfy.calls                                  # once, after the last take, not between the two
+            assert b.comfy.calls[-1] == "/free" and b.comfy.calls.count("/prompt") == 2
+        finally:
+            b.close()
+
+
+def test_a_failed_take_frees_too_and_a_comfyui_that_cannot_free_never_fails_a_take():
+    with _t.tmpdir() as d:
+        b = Box(d, mode="fail")
+        try:
+            tid = b.call("POST", f"{API}/minimax_h3_lightx2v", FL)[1]["data"]["task_id"]
+            assert b.wait(tid)["status"] == "FAILED"
+            assert settle(lambda: frees(b) == 1)                                 # after an out-of-memory take the card is the most in need
+        finally:
+            b.close()
+    with _t.tmpdir() as d:
+        b = Box(d)
+        try:
+            def boom():
+                raise RuntimeError("down")
+            b.host.free_comfy = boom
+            tid = b.call("POST", f"{API}/minimax_h3_lightx2v", FL)[1]["data"]["task_id"]
+            assert b.wait(tid)["status"] == "SUCCESS"
+            tid = b.call("POST", f"{API}/minimax_h3_lightx2v", FL)[1]["data"]["task_id"]       # and the worker takes the next one
+            assert b.wait(tid)["status"] == "SUCCESS" and b.call("GET", "/health", token=None)[1]["worker"] == "alive"
+        finally:
+            b.close()
+
+
+def test_the_free_after_a_take_can_be_switched_off_and_still_asked_for_by_hand():
+    with _t.tmpdir() as d:
+        b = Box(d, free_after_take=False)
+        try:
+            tid = b.call("POST", f"{API}/minimax_h3_lightx2v", FL)[1]["data"]["task_id"]
+            assert b.wait(tid)["status"] == "SUCCESS"
+            time.sleep(0.5)
+            assert frees(b) == 0, b.comfy.calls
+            assert b.call("POST", "/cloudgpu/free", {})[1]["data"]["freed"] is True and frees(b) == 1      # asking by hand still works
+        finally:
+            b.close()
+
+
+def test_post_cloudgpu_free_is_token_checked_and_does_nothing_while_a_take_is_accepted():
+    with _t.tmpdir() as d:
+        b = Box(d, free_after_take=False)
+        try:
+            assert b.call("POST", "/cloudgpu/free", {}, token="x" * 32)[0] == 401 and b.call("POST", "/cloudgpu/free", {}, token=None)[0] == 401
+            assert frees(b) == 0
+            with b.host.lock:
+                b.host.n_active += 1                                             # a take is being accepted
+            code, doc = b.call("POST", "/cloudgpu/free", {})
+            assert code == 200 and doc["data"] == {"freed": False} and frees(b) == 0
+            with b.host.lock:
+                b.host.n_active -= 1
+            assert b.call("POST", "/cloudgpu/free", {})[1]["data"] == {"freed": True} and frees(b) == 1
+        finally:
+            b.close()
+
+
+def test_health_says_the_free_memory_comfyui_reports_and_null_when_it_does_not():
+    with _t.tmpdir() as d:
+        b = Box(d)
+        try:
+            assert b.call("GET", "/health", token=None)[1]["vram_free_mib"] is None                  # a ComfyUI that gives no devices
+            b.comfy.stats = {"system": {}, "devices": [{"name": "cuda:0", "vram_total": 49140 * 2**20, "vram_free": 40000 * 2**20}]}
+            b.host._comfy = (0.0, False)
+            assert b.call("GET", "/health", token=None)[1]["vram_free_mib"] == 40000
+            b.comfy.stats = {"devices": [{"vram_free": "lots"}]}
+            b.host._comfy = (0.0, False)
+            assert b.call("GET", "/health", token=None)[1]["vram_free_mib"] is None
         finally:
             b.close()
 
@@ -883,6 +989,8 @@ def test_a_voice_take_returns_a_wav_with_the_hosted_call_shape_and_is_served_as_
             assert b.call("GET", "/health", token=None)[1]["busy"] >= 0
             assert not list((b.root / "input").iterdir()) and not list(Path(d, "state").glob("voice-*"))          # input and job file are gone
             assert "/free" in b.comfy.calls                                                          # ComfyUI was asked to make room
+            time.sleep(0.3)
+            assert frees(b) == 1                                                                     # once, before the voice: not again after it
         finally:
             b.close()
 

@@ -45,6 +45,7 @@ from .errors import CloudGpuError
 POOL_VAR = "CLOUDGPU_POOL"
 PIN_FILE = "cloudgpu_box"
 RETRY_DOWN_S = 60.0
+WAIT_SAY_EVERY_S = 180.0           # the default on_wait says a wait at once and then one line per this many seconds
 POLL_S = 2.0
 BEAT_S = 20.0                      # a third of the adapter's lease (60 s)
 DEPTH_VAR = "CLOUDGPU_QUEUE_DEPTH"
@@ -97,11 +98,14 @@ class _Places:
 
 class Pool:
     def __init__(self, boxes: list, *, pin_file: str = PIN_FILE, retry_down: float = RETRY_DOWN_S, poll: float = POLL_S, clock=time.monotonic, sleep=time.sleep,
-                 state_dir=None, now=time.time, on_wait=None, beat: float = BEAT_S, depth: int = 1):
+                 state_dir=None, now=time.time, on_wait=None, beat: float = BEAT_S, depth: int = 1, wait_say_every_s: float = WAIT_SAY_EVERY_S):
         self.boxes = boxes
         self.pin_file, self.retry_down, self.poll, self._clock, self._sleep = pin_file, retry_down, poll, clock, sleep
         self._state_dir, self._now = state_dir, now              # the holds' directory (None: CLOUDGPU_STATE_DIR, else ~/.cloudgpu) and the wall clock they are read against
+        self._custom_wait = on_wait is not None                  # a caller's own on_wait gets every change of the text, as before
         self._on_wait = on_wait or (lambda msg: print(msg, file=sys.stderr, flush=True))
+        self.wait_say_every_s = wait_say_every_s
+        self._waited = threading.local()                         # this thread's take: when its wait began and when the default on_wait last spoke
         self._said: dict[str, str] = {}                          # what was already announced, by kind: a wait is said once, not every poll
         self.depth = max(1, min(int(depth), MAX_DEPTH))          # takes of this machine on a box at once (the adapter queues them behind each other)
         self._free = {n: _Places(self.depth) for n, _ in boxes}
@@ -146,6 +150,17 @@ class Pool:
         return self._state_dir if self._state_dir is not None else hold.state_dir(os.environ)
 
     def _say(self, key: str, text: str) -> None:
+        if not self._custom_wait:                                # the default says the first text at once, then one line per interval with the wait so far
+            now, w = self._clock(), self._waited
+            if getattr(w, "t0", None) is None:
+                w.t0, w.last = now, now
+            elif now - w.last >= self.wait_say_every_s:
+                w.last = now
+                text += f" (still waiting, {int(now - w.t0)} s)"
+            else:
+                return
+            self._on_wait(text)
+            return
         if self._said.get(key) != text:
             self._said[key] = text
             self._on_wait(text)
@@ -167,6 +182,7 @@ class Pool:
                 yield box
         finally:
             self._leave(lines)
+            self._waited.t0 = None
             if tk is not None:
                 tk.close()
 

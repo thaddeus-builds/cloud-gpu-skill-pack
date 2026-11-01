@@ -329,6 +329,28 @@ def test_mode_a_builds_the_fl2va_graph_with_the_still_as_first_and_last_frame():
             b.close()
 
 
+def test_text_to_video_needs_only_a_prompt_and_a_duration_and_builds_the_fl2va_graph_with_no_frames():
+    with _t.tmpdir() as d:
+        b = Box(d)
+        try:
+            assert b.call("GET", "/health", token=None)[1]["t2v"] is True
+            for body in ({"duration": 4}, {"prompt": "A street at night.", "duration": 16}, {"prompt": "A street.", "duration": 4, "resolution": "1080p竖"}):
+                assert b.call("POST", f"{API}/minimax_h3_t2v", body)[0] == 400, body
+            tid = b.call("POST", f"{API}/minimax_h3_t2v", {"prompt": "A street at night.", "duration": 4, "seed": 5})[1]["data"]["task_id"]
+            r = b.wait(tid)
+            assert r["status"] == "SUCCESS" and r["results"][0]["file_type"] == "mp4", r
+            g = b.comfy.graphs[0]
+            i = g["7"]["inputs"]
+            assert g["7"]["class_type"] == "MiniMaxH3ImageToVideo" and "first_frame" not in i and "last_frame" not in i
+            assert (i["width"], i["height"], i["length"], i["prompt"]) == (768, 1344, adapter.frames_for(4), "A street at night.")     # 768p vertical by default
+            assert g["1"]["inputs"]["unet_name"] == adapter.MODELS["unet_fl"] and g["20"]["inputs"]["lora_name"] == adapter.MODELS["lora_fl"]
+            assert g["10"]["inputs"]["steps"] == adapter.MODELS["steps_fl"] and g["9"]["inputs"]["noise_seed"] == 5
+            assert not any(n["class_type"] in ("LoadImage", "LoadAudio") for n in g.values())
+            assert not list((b.root / "input").iterdir())
+        finally:
+            b.close()
+
+
 def test_a_failed_take_says_why_and_the_worker_goes_on():
     with _t.tmpdir() as d:
         b = Box(d, mode="fail")

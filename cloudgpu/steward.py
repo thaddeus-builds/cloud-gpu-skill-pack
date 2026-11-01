@@ -179,7 +179,7 @@ class Steward:
     # ---- ensure ----
     def ensure(self, count: int, template: dict, *, specs=None, centers=None, yes: bool = False, patience: float = PATIENCE_S, delays=BACKOFF_S, boot_wait: float = BOOT_WAIT_S) -> dict:
         """Have `count` of the boxes this setup knows (the ledger's, and the ones wired in the settings) running. Order: instances already running count; then those that are off and
-        billed by the hour are powered on (a pass that is off is a person's to renew); then, inside the allowance, new ones are created from `template` for each card spec in `specs`,
+        billed by the hour, or a pass that has not ended, are powered on (a pass that has ended is a person's to renew); then, inside the allowance, new ones are created from `template` for each card spec in `specs`,
         in order, at each data center in `centers`, in order. A card that is not in stock is tried again after a pause (`delays`, at most `patience` seconds in all); every other
         failure is reported once and not retried. Without `yes` nothing is changed: the plan is returned. The result says how many are up, how many are missing, and each failure's reason."""
         specs = list(specs or DEFAULT_SPECS)

@@ -77,6 +77,13 @@ def test_the_end_time_is_read_with_its_own_offset_not_the_machines():
     assert expiry.hours_left(naive, NOW) == 10.0
 
 
+def test_a_pass_that_ended_a_minute_ago_has_ended_and_a_fraction_of_a_second_is_read():
+    r = expiry.row(inst("pro-1", "weekly", at(hours=-0.03), status="shutdown"), NOW)
+    assert r["state"] == "expired" and r["level"] == "error"
+    for frac in (".1", ".12", ".1234", ".123456789"):
+        assert abs(expiry.hours_left(at(hours=10).replace("+08:00", frac + "+08:00"), NOW) - 10) < 0.01, frac
+
+
 def test_the_warning_days_are_a_setting_and_a_bad_value_is_the_default():
     assert expiry.warn_days({}) == 3.0 and expiry.warn_days({"CLOUDGPU_PASS_WARN_DAYS": "5"}) == 5.0 and expiry.warn_days({"H3HOST_PASS_WARN_DAYS": "1.5"}) == 1.5
     for bad in ("soon", "0", "-2", "nan", "inf", ""):
@@ -138,6 +145,12 @@ def test_instances_expiry_exits_0_1_2_and_lists_only_the_boxes_asked_for():
     code, out, _ = run_cli(well, "expiry")
     doc = json.loads(out)
     assert code == 1 and doc["level"] == "warn" and len(doc["alerts"]) == 1 and "pro-2" in doc["alerts"][0]
+    code, out, _ = run_cli(well, "expiry", "pro-1", "pro-typo", "pro-3")                # a named id that is no pass is said, and is not "all well"
+    doc = json.loads(out)
+    assert code == 1 and doc["not_passes"] == ["pro-3", "pro-typo"] and doc["level"] == "warn" and any("pro-typo" in m for m in doc["alerts"])
+    for bad in ("0", "-1", "nan"):
+        code, out, _ = run_cli(well, "expiry", "--warn-days", bad)
+        assert code == 1 and "above 0" in json.loads(out)["error"], bad
     well.rows["pro-2"].ends = real_now_ends(-0.1)
     assert run_cli(well, "expiry")[0] == 2
     assert run_cli(well, "expiry", "--warn-days", "9")[0] == 2 and json.loads(run_cli(well, "expiry", "--warn-days", "9")[1])["warn_days"] == 9.0

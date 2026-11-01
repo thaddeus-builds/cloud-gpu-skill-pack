@@ -105,11 +105,15 @@ More than one reference picture (0.8.0): `ref_image_1`..`ref_image_8` take the s
 reads only `<Picture 1>`, so a caller that sends extra pictures should send its own prompt. Measured by the issue's author on the 4090 (48 GB) with one extra picture: 480p, 4.4 s take, 66 s (queued behind another take); 768p, 135 s;
 the large print on a held pack is legible, small print is not. **Not measured:** the 32 GB card (4080 SUPER) with extra pictures: it held 31 GB with one picture, so it may run out of memory.
 A third workflow, `indextts2-v1`, is the voice (0.6.0, below): the same call as the hosted one, the result a wav.
+Text to video (0.12.0): `minimax_h3_t2v` takes `prompt`, `duration` 1..15 and optionally `resolution` (default `768p竖`) and `seed`, and no picture or audio: it is the Mode A graph (same FL2VA model,
+same turbo lora and steps, same `--models` names) with both frame inputs left out, so the model invents the picture and speaks what the prompt says. A consumer found the graph by hand on a 4090 box (three
+clips, 768x1344, 90 frames, 6 steps); the adapter's own run of it has not been measured. An adapter older than 0.12.0 answers 400 `unknown workflow`: ask `/health` for `"t2v": true` first.
 
-`GET /health` (no token) answers `{"ok", "comfy", "busy", "worker": "alive"|"dead", "card", "memory_mib", "voice"}` and, when asked with `?nonce=`, a `proof`. `ok` is false when the worker thread is dead. `busy` counts
+`GET /health` (no token) answers `{"ok", "comfy", "busy", "worker": "alive"|"dead", "card", "memory_mib", "vram_free_mib", "voice", "files", "t2v"}` and, when asked with `?nonce=`, a `proof`. `ok` is false when the worker thread is dead. `busy` counts
 a take from the moment it is accepted (while its inputs are still being fetched) until it is over **and collected** (the video downloaded, or the failure read), or 300 s after it finished.
 `card` is the GPU the box runs on, as `nvidia-smi` names it with its memory (`NVIDIA GeForce RTX 4090, 49140 MiB`; `unknown` when it cannot say); `memory_mib` is the first card's memory as a number (`null` when unknown), so a consumer can check the size without parsing text: compare it with the box you declared
-(`CLOUDGPU_BOX`); `python3 -m cloudgpu status` does and says so in `next` when they differ. `voice` is true when the box has the voice installed. From 0.7.0 a caller waiting in the box's line also counts in `busy`.
+(`CLOUDGPU_BOX`); `python3 -m cloudgpu status` does and says so in `next` when they differ. `vram_free_mib` is the free memory of ComfyUI's first device as ComfyUI itself reports it (`null` when ComfyUI is down or does not say), so a consumer can see whether a second model fits
+before it loads it. `voice` is true when the box has the voice installed; `t2v` is true when it serves `minimax_h3_t2v`. From 0.7.0 a caller waiting in the box's line also counts in `busy`.
 
 Errors are `CloudGpuError` with `kind`: `key_missing` (a setting or a key file is not right), `http` (a vendor API answered no), `unknown` (not a backend), `down` (the box
 does not answer and nothing can start it), `timeout` (it did not come up); `next` lists what a person can do.
@@ -158,7 +162,7 @@ with pool.take(out_dir, sent=lambda d: (d / "task_id").exists()) as box:
 ```
 
 A take waits for the first box in the list that is not making another take (a box makes one at a time) and comes up (`Box.ensure_up`). A box that fails to come up is tried again after a
-minute; every box down with none busy raises the last box's `CloudGpuError` instead of waiting for ever. The choice is written to the take's folder, and a take the caller says was sent
+minute; every box down with none busy raises the last box's `CloudGpuError` instead of waiting for ever. The choice is written to the take's folder (also by a pool of one named box, `CLOUDGPU_POOL=b`; a plain unnamed box writes none), and a take the caller says was sent
 earlier runs on the box that holds it and on no other: only that box can give its result back. Threads of one process share one pool, so with two boxes two takes run at once.
 
 ### A person's hold on a box (0.4.0)
@@ -172,7 +176,7 @@ python3 -m cloudgpu release BOX
 
 A hold is one small file per box in `CLOUDGPU_STATE_DIR` (default `~/.cloudgpu/holds/`), so it works across processes and restarts and **ends by itself at its time** (at most 480 minutes; someone
 else's active hold is not replaced, your own is extended). `Pool.take` counts a held box as busy and uses another; when every box it may use is held (a pool of one, or a take sent earlier that must
-return to its box) it waits, saying `waiting for the hold on BOX by NAME until HH:MM` once on stderr (or through `Pool(on_wait=fn)`), and goes when the hold ends. `Pool.power_off_if_idle` leaves a held
+return to its box) it waits, saying `waiting for the hold on BOX by NAME until HH:MM` once on stderr (or through `Pool(on_wait=fn)`), and goes when the hold ends. The default `on_wait` (stderr) says a wait at once and then one line per `wait_say_every_s` (default 180 s) with the wait so far (`... (still waiting, 200 s)`); a function passed as `on_wait` gets every change of the text, as before. `Pool.power_off_if_idle` leaves a held
 box on. `python3 -m cloudgpu status` lists the active holds. **Limit:** a hold governs callers that go through `Pool`; someone who talks to ComfyUI directly is not stopped, and a hold on a box
 does not stop a take already running on it. 
 
@@ -267,7 +271,20 @@ and not waited for: the take goes as before, and the adapter's own queue still s
 waiting take), and a caller whose ticket was forgotten joins again at the back. A ticket's label (this machine's name and the take's folder name) is sent to the box. A hold (above) is still per machine. Out of scope, as before:
 autoscaling, or powering more boxes on to shorten a line.
 
-## How much a box works: `util` (0.12.0)
+## Giving the card's memory back after a take (0.13.0)
+
+The picture models live in the ComfyUI process, not in the adapter (which is standard library only and has no torch), and ComfyUI keeps them on the card after a take: an idle box measured
+46735 of 49140 MiB used, so a second model (the VoxCPM voice needs about 6 GB) could not load next to it. So after a take that leaves nothing accepted or queued, the adapter asks ComfyUI to unload its models
+and free its memory (`POST /free` with `unload_models` and `free_memory`, the call the IndexTTS2 voice already makes before it runs). It is best effort: ComfyUI down, an older ComfyUI or a timeout never fails a take.
+A take that is accepted or running holds it back, so a queue of takes frees once, after the last one. It is done after a failed take too (an out-of-memory take leaves the most behind).
+
+**The cost:** the next take loads its models again (the H3 weights are several GB: seconds to a minute or more, measure it on your box). **Turn it off** (`CLOUDGPU_FREE_AFTER_TAKE=0` in the environment of
+`start.sh`, or `--free-after-take 0`) on a box that only makes video and nothing else uses the card, or where takes come minutes apart in bursts you would rather keep warm. Default on.
+A caller that wants the memory now (before it starts another model on the card) can also ask: `POST /cloudgpu/free` (token-checked, like every call but `/health`) answers `{"data":{"freed":bool}}`; `freed` is false
+when a take is accepted or running, or ComfyUI did not answer. Callers can ignore the answer; asking works whatever the setting is. `vram_free_mib` in `/health` shows the effect. A caller waiting in the box's line
+does not hold the free back (it has no take yet): its take loads the models again. **Not measured:** how much of the 46 GB ComfyUI gives back on a real box (`/free` also depends on the ComfyUI version).
+
+## How much a box works: `util` (0.14.0)
 
 A consumer's own wall clock cannot say whether the box is the bottleneck: a take that took 143 s on the consumer's side may have been 40 s on the box, with a new one reaching it only every few minutes.
 `python3 -m cloudgpu util [--since TIME] [BOX...]` reads each box's task records and prints, per box and workflow, the number of takes and how many failed, the time from creation to done (median and

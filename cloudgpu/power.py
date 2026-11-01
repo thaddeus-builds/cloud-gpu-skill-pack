@@ -9,15 +9,14 @@ power the box on and off; without them the default backend is "not configured": 
 
 from __future__ import annotations
 
-import time
 from collections.abc import Mapping
 
-from . import config, vendors
+from . import config, expiry, vendors
 from .errors import CloudGpuError
+from .expiry import PASS_BILLING             # noqa: F401  (re-exported: status.py and box.py import it from here)
 from .vendors import Vendor
 
 HOURLY_BILLING = "payg"                             # autodl's charge_type of a box paid by the hour: the only one that is ever powered off to save money
-PASS_BILLING = ("daily", "weekly", "monthly")      # autodl's charge_type of a pass: paid whether the card works or not
 DEFAULT_BACKEND = "autodl"
 NO_ACCOUNT_HINT = ("with CLOUDGPU_POWER=none this package has no view of the cloud account, so it cannot tell a box that is switched off from one whose pass has ended or that was released. "
                    "To see which, and to start it, set AUTODL_DEV_TOKEN (the account's developer token: console -> account -> settings) and CLOUDGPU_INSTANCE (the pro-... number) "
@@ -61,7 +60,7 @@ class VendorPower(Power):
     """A power backend made from a cloud vendor (cloudgpu/vendors/) and an instance id (CLOUDGPU_INSTANCE): every vendor that is taken in gets one for free."""
 
     def __init__(self, vendor: Vendor, env: Mapping | None = None):
-        self.vendor, self.name = vendor, vendor.name
+        self.vendor, self.name, self.env = vendor, vendor.name, env
         self.instance = config.get("INSTANCE", env)
 
     def configured(self) -> bool:
@@ -92,7 +91,10 @@ class VendorPower(Power):
             return {"error": "the account lists no instance of that id"}
         out = {"billing": i.billing, "ends": i.ends, "status": i.status, "gpu_spec": i.gpu_spec, "region": i.region}
         if i.ends and i.billing in PASS_BILLING:
-            out["hours_left"] = round((time.mktime(time.strptime(i.ends[:19], "%Y-%m-%dT%H:%M:%S")) - time.time()) / 3600, 1)
+            out["hours_left"] = expiry.hours_left(i.ends)
+        r = expiry.row(i, days=expiry.warn_days(self.env), vendor=self.name)
+        if r:
+            out["expiry"] = r
         return out
 
     def ssh(self):

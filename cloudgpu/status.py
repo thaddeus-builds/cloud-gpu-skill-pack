@@ -48,7 +48,7 @@ def status(env: Mapping | None = None, envfile: str | None = None) -> dict:
     elif impostor:
         pass
     elif health is None:
-        nxt.append("the box does not answer: a tunnel that is down, or the box is off"
+        nxt.append("the box does not answer: a tunnel that is down, or the box is off or its pass has ended"
                    + ("; the box opens the tunnel by key" if box.get("SSH_KEY") else "; set CLOUDGPU_SSH_KEY to let it open the tunnel"))
     elif not health.get("comfy"):
         nxt.append("the adapter answers but ComfyUI does not yet: wait a minute after a power-on, then run this again")
@@ -68,6 +68,9 @@ def status(env: Mapping | None = None, envfile: str | None = None) -> dict:
                 nxt.append("the pass has ended: renew it at the vendor")
             if config.flag("AUTOOFF", box.env):
                 nxt.append("CLOUDGPU_AUTOOFF is set on a pass: powering off saves nothing there (a pass is left on), unset it")
+    elif pw is not None and health is None and reach_ok and pw.name == "none":
+        nxt.append("this setup cannot tell whether the box is off, its pass has ended, or it was released: it has no view of the cloud account. Set AUTODL_DEV_TOKEN and CLOUDGPU_INSTANCE "
+                   "(the account holder has them and gives them to whoever runs this, never in chat) and unset CLOUDGPU_POWER: `status` then says which, and a box that is off is started")
     elif pw is not None and health is None and reach_ok:
         nxt.append(f"the {pw.name} power backend is not configured, so the box is not powered on for you: start it at its vendor, or set its variables "
                    "(docs/cloud-gpu.md, 'Power'), or CLOUDGPU_POWER=none when it is always on")

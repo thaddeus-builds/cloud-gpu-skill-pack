@@ -10,6 +10,7 @@ cloudgpu/           the package: Box (reach, tunnel, power), Pool (boxes in orde
 cloudgpu/onbox/       install.sh, tunnel.sh, the two verified model presets
 cloudgpu/data/      runs.jsonl: the takes measured on a 4090 48G and an RTX PRO 6000
 docs/cloud-gpu.md   what it costs, how to set up a box, the settings, the calls, safety
+docs/how-to-run-boxes.md   passes are the base, hourly boxes the top-up: who does what and when a pass ends
 skills/cloud-gpu/   an agent's order of work and what only a person does
 tests/              python3 tests/run.py (offline: a fake ComfyUI stands in for the card)
 ```

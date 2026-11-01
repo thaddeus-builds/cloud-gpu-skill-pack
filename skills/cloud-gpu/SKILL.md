@@ -29,6 +29,9 @@ never release a box you did not make. Refused (`over_quota`, `not_allowed`)? say
 4. **Power.** `autodl` is the default backend: `CLOUDGPU_INSTANCE` and `AUTODL_DEV_TOKEN` power the box on and off. A box that is always on, a pass, or a vendor with no API: `CLOUDGPU_POWER=none`.
    `Box.ensure_up()` powers a box on without asking (by design: whoever holds the account token and the instance id is the operator); do not give a process those two if it must not start billing.
    A day or month pass is paid anyway: leave `CLOUDGPU_AUTOOFF` unset. A new cloud with an API is one `Vendor` module (docs, "Cloud vendors and power"): the power backend, `instances` and `status` then work for it.
+4a. **A pass ends.** Passes (daily, weekly, monthly) are the base, bought and renewed by a person in the console; you cannot (the API only creates hourly instances). `instances expiry` (or `status`, `ensure`) names each
+   pass that ends in under `CLOUDGPU_PASS_WARN_DAYS` (default 3) or has ended: tell the account holder, with the box, the end time and the line as printed. A pass that is only switched off is powered on (`ensure`); an hourly box you made is
+   released when the work is done. `docs/how-to-run-boxes.md` has the table.
 4b. **A box is gone or off.** `none` cannot tell off from ended: say so, and ask the account holder for `AUTODL_DEV_TOKEN` and `CLOUDGPU_INSTANCE` (never in chat), or to look in the console.
    With them `status` says which; inside an allowance `instances ensure --count N` brings boxes back or rents new ones and reports how many are up, how many are missing and why (`no_stock` is retried by it,
    every other failure is not). A new box still needs its adapter, token, settings and voice service (docs, "A new box: what is automatic and what is not").

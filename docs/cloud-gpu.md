@@ -97,7 +97,7 @@ box.power_off_if_idle()          # only when GET /health answered and says busy 
 ```
 
 Workflows (the names autodl publishes): `minimax_h3_image_audio_to_video` (`ref_image_0`, optional `ref_image_1`..`ref_image_8`, `ref_audio_0`, `audio_duration` 1..15, `resolution`) and `minimax_h3_lightx2v` (Mode A:
-`prompt`, `first_frame`, `last_frame`, `duration` 1..15, `resolution`, `seed`). `resolution` is `480p竖` or `768p竖` (1080p was never run on these cards). Inputs are http(s) URLs or
+`prompt`, `first_frame`, `last_frame`, `duration` 1..15, `resolution`, `seed`). `resolution` is `480p竖` (480x864), `768p竖` (768x1344), `480p横` (864x480) or `768p横` (1344x768; landscape, 0.15.0). 1080p was never run on these cards. Inputs are http(s) URLs or
 `data:` URIs. The result URL is `/files/<random>.mp4` (relative when the box has no public address: join it to the base you reached it at) and lives one hour: download at once.
 A body the box will not run is HTTP 400 `RequestParameterIsWrong` before anything is queued. One take runs at a time; a take found waiting after a restart is failed, never re-run.
 More than one reference picture (0.8.0): `ref_image_1`..`ref_image_8` take the same URL or `data:` rules as `ref_image_0`, in order with no gap (a gap or a ninth is a 400). In the prompt they are
@@ -283,6 +283,13 @@ A take that is accepted or running holds it back, so a queue of takes frees once
 A caller that wants the memory now (before it starts another model on the card) can also ask: `POST /cloudgpu/free` (token-checked, like every call but `/health`) answers `{"data":{"freed":bool}}`; `freed` is false
 when a take is accepted or running, or ComfyUI did not answer. Callers can ignore the answer; asking works whatever the setting is. `vram_free_mib` in `/health` shows the effect. A caller waiting in the box's line
 does not hold the free back (it has no take yet): its take loads the models again. **Not measured:** how much of the 46 GB ComfyUI gives back on a real box (`/free` also depends on the ComfyUI version).
+
+## Landscape (0.15.0)
+
+`480p横` (864x480) and `768p横` (1344x768) are the vertical sizes with the sides swapped, accepted by all three video workflows. A consumer measured `minimax_h3_lightx2v` at `768p横` on a rented
+box: 1344x768, 24 fps, 5 s, about 145 s on the box (a vertical 768p take took about 143 s). `480p横` has no recorded run; the price rows come from recorded runs only, so landscape gets one once a run
+is recorded (`runs.jsonl` names the resolution `480p`/`768p` for both orientations: same pixel count, same cost). The audio-driven default prompt says "wide screen video" instead of "vertical phone video" for a landscape size.
+A box whose adapter was edited by hand to add these two sizes is overwritten by this version: nothing else is needed.
 
 ## How much a box works: `util` (0.14.0)
 

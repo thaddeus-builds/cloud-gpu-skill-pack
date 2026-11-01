@@ -17,6 +17,7 @@ never release a box you did not make. Refused (`over_quota`, `not_allowed`)? say
 
 1. **Look first, free.** `python3 -m cloudgpu status` (read only: no take, no power call, no value printed; `line` lists who runs on the box and who waits, `queue` this machine's takes). `ready: true` means a take could go now; every line of `next` is one thing a
    person must do (a setting, the tunnel, a pass that ended). Give the person those lines as they are.
+   `python3 -m cloudgpu util [--since 2h]` is also read only: per box and workflow, how long a take took on the box, the gap between takes and the busy share (is the box the bottleneck?).
 2. **A new box.** The person rents it and gives you its SSH line (not a password). `python3 -m cloudgpu bundle` makes what goes onto the box; the person (or you, when they
    have given you a key that already works) copies it, runs `sh install.sh auto 6009 < token-file`, and puts the public half of a restricted key in `authorized_keys` (docs, "Set up a box").
    If `install.sh` reports missing model files, the image does not carry H3: say so, do not look for the files elsewhere. The voice (IndexTTS2) is optional: `install.sh` says whether it found one and

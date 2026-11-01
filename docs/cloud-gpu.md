@@ -105,11 +105,14 @@ More than one reference picture (0.8.0): `ref_image_1`..`ref_image_8` take the s
 reads only `<Picture 1>`, so a caller that sends extra pictures should send its own prompt. Measured by the issue's author on the 4090 (48 GB) with one extra picture: 480p, 4.4 s take, 66 s (queued behind another take); 768p, 135 s;
 the large print on a held pack is legible, small print is not. **Not measured:** the 32 GB card (4080 SUPER) with extra pictures: it held 31 GB with one picture, so it may run out of memory.
 A third workflow, `indextts2-v1`, is the voice (0.6.0, below): the same call as the hosted one, the result a wav.
+Text to video (0.12.0): `minimax_h3_t2v` takes `prompt`, `duration` 1..15 and optionally `resolution` (default `768p竖`) and `seed`, and no picture or audio: it is the Mode A graph (same FL2VA model,
+same turbo lora and steps, same `--models` names) with both frame inputs left out, so the model invents the picture and speaks what the prompt says. A consumer found the graph by hand on a 4090 box (three
+clips, 768x1344, 90 frames, 6 steps); the adapter's own run of it has not been measured. An adapter older than 0.12.0 answers 400 `unknown workflow`: ask `/health` for `"t2v": true` first.
 
-`GET /health` (no token) answers `{"ok", "comfy", "busy", "worker": "alive"|"dead", "card", "memory_mib", "voice"}` and, when asked with `?nonce=`, a `proof`. `ok` is false when the worker thread is dead. `busy` counts
+`GET /health` (no token) answers `{"ok", "comfy", "busy", "worker": "alive"|"dead", "card", "memory_mib", "voice", "files", "t2v"}` and, when asked with `?nonce=`, a `proof`. `ok` is false when the worker thread is dead. `busy` counts
 a take from the moment it is accepted (while its inputs are still being fetched) until it is over **and collected** (the video downloaded, or the failure read), or 300 s after it finished.
 `card` is the GPU the box runs on, as `nvidia-smi` names it with its memory (`NVIDIA GeForce RTX 4090, 49140 MiB`; `unknown` when it cannot say); `memory_mib` is the first card's memory as a number (`null` when unknown), so a consumer can check the size without parsing text: compare it with the box you declared
-(`CLOUDGPU_BOX`); `python3 -m cloudgpu status` does and says so in `next` when they differ. `voice` is true when the box has the voice installed. From 0.7.0 a caller waiting in the box's line also counts in `busy`.
+(`CLOUDGPU_BOX`); `python3 -m cloudgpu status` does and says so in `next` when they differ. `voice` is true when the box has the voice installed; `t2v` is true when it serves `minimax_h3_t2v`. From 0.7.0 a caller waiting in the box's line also counts in `busy`.
 
 Errors are `CloudGpuError` with `kind`: `key_missing` (a setting or a key file is not right), `http` (a vendor API answered no), `unknown` (not a backend), `down` (the box
 does not answer and nothing can start it), `timeout` (it did not come up); `next` lists what a person can do.

@@ -7,11 +7,12 @@ calls a client of that API already makes, so a client needs a base URL and a tok
     GET  /api/v1/comfyui/comfyui_workflow/result/{task_id}  -> {"code":"Success","data":{"status":QUEUED|RUNNING|SUCCESS|FAILED,
                                                                 "results":[{"url":...,"type":"video","file_type":"mp4"}]}}
     GET  /health[?nonce=X]                                  -> {"ok":bool,"comfy":bool,"busy":N,"worker":"alive"|"dead","card":"NVIDIA ..., 49140 MiB"|"unknown",
-                                                                "memory_mib":49140|null,"voice":bool [,"proof":HMAC-SHA256(token, X) hex]}   (no token; `ok` is false when the worker thread is
+                                                                "memory_mib":49140|null,"voice":bool,"t2v":bool [,"proof":HMAC-SHA256(token, X) hex]}   (no token; `ok` is false when the worker thread is
                                                                 dead; N = takes accepted and not yet over, plus finished ones not yet collected until
                                                                 GRACE_S after they finished: a caller shuts the box down only at 0. `card` is the GPU the
                                                                 box runs on, so a caller can check the box it declared; `memory_mib` is the first GPU's
-                                                                memory as a number, null when unknown; `voice` is true when indextts2-v1 is installed. `proof` lets a client that holds the token tell
+                                                                memory as a number, null when unknown; `voice` is true when indextts2-v1 is installed; `t2v` is true when this adapter serves
+                                                                minimax_h3_t2v (an adapter without it does not say, and refuses the workflow). `proof` lets a client that holds the token tell
                                                                 this adapter from another process holding the tunnel's port: it is answered only when the
                                                                 bind address is loopback, for a nonce of 16 to 64 lowercase hex characters, at most
                                                                 PROOF_PER_MIN a minute; on a widened bind there is no proof (it would be an offline
@@ -37,13 +38,14 @@ Workflows (the names autodl publishes, so a project's avatar.workflow keeps work
                                       FL2VA-free path: the reference-to-video model (ref2va) with the take's audio as <Audio 1>
     minimax_h3_lightx2v               prompt + first_frame + last_frame + duration + resolution (+ seed)
                                       Mode A: the FL2VA model speaks the prompt's line itself
+    minimax_h3_t2v                    prompt + duration + resolution (+ seed): text to video, no picture and no audio in; the FL2VA model (turbo lora) makes the picture and the sound
     resolution: "480p竖" 480x864 | "768p竖" 768x1344. 1080p is refused: it was never run on this card.
     indextts2-v1                      prompt_text + prompt_simple (the voice sample) + emo_control_method (+ emo_happy .. emo_calm, emo_ref_audio, emo_alpha, emo_random)
                                       the voice: IndexTTS2 run by tts_worker.py in its own Python environment (--tts-python, --tts-dir); the result is a wav
                                       (type "audio", file_type "wav"). Without a voice installed the box answers 400 and /health says "voice": false.
 Inputs are http(s) URLs or data: URIs. A URL that points at this machine or a private address is refused (this box is
-not a proxy into its own network). Both graphs are ComfyUI's own open templates (video_minimax_h3_r2v, video_minimax_h3_i2v),
-rebuilt as API graphs here; the box's other H3 workflows carry their author's lock and are not used.
+not a proxy into its own network). The graphs are ComfyUI's own open templates (video_minimax_h3_r2v, video_minimax_h3_i2v),
+rebuilt as API graphs here (text to video is the i2v one with both frame inputs left out); the box's other H3 workflows carry their author's lock and are not used.
 
 One GPU runs one take at a time (ComfyUI queues), so tasks, a voice included, are served in order by one worker. A task found QUEUED or RUNNING
 after a restart is FAILED ("restarted"), never silently re-run, its input files are deleted, and ComfyUI is told to interrupt and clear its queue so the
@@ -122,7 +124,7 @@ LEASE_S = 60                       # a ticket nobody asked about for this long i
 MAX_LINE = 64
 LABEL_MAX = 80
 TTS_WORKFLOW = "indextts2-v1"
-WORKFLOWS = {"minimax_h3_image_audio_to_video": "ref", "minimax_h3_lightx2v": "fl", TTS_WORKFLOW: "tts"}
+WORKFLOWS = {"minimax_h3_image_audio_to_video": "ref", "minimax_h3_lightx2v": "fl", "minimax_h3_t2v": "t2v", TTS_WORKFLOW: "tts"}
 MAX_EXTRA_IMAGES = 8                # ref_image_1 .. ref_image_8 beside ref_image_0 (the hosted workflow takes up to 9 pictures)
 TTS_MAX_CHARS = 2000
 TTS_TIMEOUT_S = 900                # the model is loaded for each voice (its VRAM is given back after), so this includes the load
@@ -148,15 +150,15 @@ def frames_for(seconds: float) -> int:
 
 # ---- ComfyUI graph -------------------------------------------------------------------------------------------------
 
-def graph(kind: str, *, w: int, h: int, seconds: float, image: str, audio: str | None, prompt: str, seed: int, prefix: str,
+def graph(kind: str, *, w: int, h: int, seconds: float, image: str | None, audio: str | None, prompt: str, seed: int, prefix: str,
           extra_images: tuple | list = ()) -> dict:
-    lora, steps = MODELS["lora_" + kind], MODELS["steps_" + kind]
+    mk = "fl" if kind == "t2v" else kind            # text to video runs the FL2VA model and its lora, with no frames given
+    lora, steps = MODELS["lora_" + mk], MODELS["steps_" + mk]
     g = {
-        "1": {"class_type": "UNETLoader", "inputs": {"unet_name": MODELS["unet_" + kind], "weight_dtype": "default"}},
+        "1": {"class_type": "UNETLoader", "inputs": {"unet_name": MODELS["unet_" + mk], "weight_dtype": "default"}},
         "2": {"class_type": "CLIPLoader", "inputs": {"clip_name": MODELS["clip"], "type": "minimax", "device": "default"}},
         "3": {"class_type": "VAELoader", "inputs": {"vae_name": MODELS["vae_video"]}},
         "4": {"class_type": "VAELoader", "inputs": {"vae_name": MODELS["vae_audio"]}},
-        "5": {"class_type": "LoadImage", "inputs": {"image": image}},
         "8": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "res_multistep"}},
         "9": {"class_type": "RandomNoise", "inputs": {"noise_seed": seed}},
         "10": {"class_type": "BasicScheduler", "inputs": {"model": ["20", 0], "scheduler": "simple", "steps": steps, "denoise": 1.0}},
@@ -170,6 +172,8 @@ def graph(kind: str, *, w: int, h: int, seconds: float, image: str, audio: str |
         "20": {"class_type": "LoraLoaderModelOnly", "inputs": {"model": ["1", 0], "lora_name": lora, "strength_model": 1.0}},
     }
     n = frames_for(seconds)
+    if kind != "t2v":
+        g["5"] = {"class_type": "LoadImage", "inputs": {"image": image}}
     if kind == "ref":
         g["6"] = {"class_type": "LoadAudio", "inputs": {"audio": audio}}
         g["7"] = {"class_type": "MiniMaxH3ReferenceToVideo", "inputs": {
@@ -178,6 +182,9 @@ def graph(kind: str, *, w: int, h: int, seconds: float, image: str, audio: str |
         for i, name in enumerate(extra_images, 1):          # <Picture 2> is ref_image_1, and so on
             g[f"5r{i}"] = {"class_type": "LoadImage", "inputs": {"image": name}}
             g["7"]["inputs"][f"ref_images.ref_image_{i}"] = [f"5r{i}", 0]
+    elif kind == "t2v":
+        g["7"] = {"class_type": "MiniMaxH3ImageToVideo", "inputs": {
+            "clip": ["2", 0], "vae": ["3", 0], "prompt": prompt, "width": w, "height": h, "length": n}}
     else:
         g["7"] = {"class_type": "MiniMaxH3ImageToVideo", "inputs": {
             "clip": ["2", 0], "vae": ["3", 0], "prompt": prompt, "width": w, "height": h, "length": n,
@@ -347,7 +354,7 @@ def plan(workflow: str, body: dict) -> dict:
         if not all(body[k] for k in extra):
             raise Refused("an extra reference picture is empty")
     else:
-        for k in ("prompt", "first_frame", "last_frame"):
+        for k in ("prompt",) if kind == "t2v" else ("prompt", "first_frame", "last_frame"):
             if not body.get(k):
                 raise Refused(f"{k} is required")
         prompt = body["prompt"]
@@ -625,6 +632,8 @@ class Host:
                 files.append(fetch(body["ref_audio_0"], inp, ("audio",), "ref_audio_0", self.files_dir))
                 for i in range(1, p.get("extra_images", 0) + 1):          # after the audio, so files[0] and files[1] mean what they always did
                     files.append(fetch(body[f"ref_image_{i}"], inp, ("image",), f"ref_image_{i}", self.files_dir))
+            elif p["kind"] == "t2v":
+                pass                        # nothing to fetch: the prompt is all there is
             else:
                 files.append(fetch(body["first_frame"], inp, ("image",), "first_frame", self.files_dir))
                 files.append(files[0] if body["last_frame"] == body["first_frame"]
@@ -692,7 +701,7 @@ class Host:
         alive = wt is not None and wt.is_alive()
         card = self.card()
         d = {"ok": alive, "comfy": self.comfy_up(), "busy": self.busy(), "worker": "alive" if alive else "dead", "card": card,
-             "memory_mib": self._mem_mib if card != "unknown" else None, "voice": bool(self.tts), "files": 1}
+             "memory_mib": self._mem_mib if card != "unknown" else None, "voice": bool(self.tts), "files": 1, "t2v": True}
         if nonce and self.proof_ok and NONCE.fullmatch(nonce) and self._proof_allowed():
             d["proof"] = hmac.new(self.token.encode(), nonce.encode(), "sha256").hexdigest()
         return d
@@ -805,7 +814,7 @@ class Host:
             time.sleep(3)
         p, files = t["plan"], t["inputs"]
         prefix = f"cloudgpu/{t['id']}"
-        g = graph(p["kind"], w=p["w"], h=p["h"], seconds=p["seconds"], image=files[0], audio=files[1] if p["kind"] == "ref" else None,
+        g = graph(p["kind"], w=p["w"], h=p["h"], seconds=p["seconds"], image=files[0] if files else None, audio=files[1] if p["kind"] == "ref" else None,
                   prompt=p["prompt"], seed=p["seed"], prefix=prefix, extra_images=files[2:] if p["kind"] == "ref" else ())
         if p["kind"] == "fl" and files[1] != files[0]:
             g["5b"]["inputs"]["image"] = files[1]

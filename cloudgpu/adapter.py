@@ -45,7 +45,7 @@ Workflows (the names autodl publishes, so a project's avatar.workflow keeps work
     minimax_h3_lightx2v               prompt + first_frame + last_frame + duration + resolution (+ seed)
                                       Mode A: the FL2VA model speaks the prompt's line itself
     minimax_h3_t2v                    prompt + duration + resolution (+ seed): text to video, no picture and no audio in; the FL2VA model (turbo lora) makes the picture and the sound
-    resolution: "480p竖" 480x864 | "768p竖" 768x1344. 1080p is refused: it was never run on this card.
+    resolution: "480p竖" 480x864 | "768p竖" 768x1344 | "480p横" 864x480 | "768p横" 1344x768 (landscape, 0.15.0). 1080p is refused: it was never run on this card.
     indextts2-v1                      prompt_text + prompt_simple (the voice sample) + emo_control_method (+ emo_happy .. emo_calm, emo_ref_audio, emo_alpha, emo_random)
                                       the voice: IndexTTS2 run by tts_worker.py in its own Python environment (--tts-python, --tts-dir); the result is a wav
                                       (type "audio", file_type "wav"). Without a voice installed the box answers 400 and /health says "voice": false.
@@ -95,7 +95,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 API = "/api/v1/comfyui/comfyui_workflow"
-RESOLUTIONS = {"480p竖": (480, 864), "768p竖": (768, 1344)}
+RESOLUTIONS = {"480p竖": (480, 864), "768p竖": (768, 1344), "480p横": (864, 480), "768p横": (1344, 768)}
 MAX_SECONDS = 15
 MAX_BODY = 96 * 1024 * 1024
 MAX_INPUT = 64 * 1024 * 1024
@@ -358,7 +358,7 @@ def plan(workflow: str, body: dict) -> dict:
         for k in ("ref_image_0", "ref_audio_0"):
             if not body.get(k):
                 raise Refused(f"{k} is required")
-        prompt = body.get("prompt") or DEFAULT_REF_PROMPT
+        prompt = body.get("prompt") or (DEFAULT_REF_PROMPT if h > w else DEFAULT_REF_PROMPT.replace("vertical phone video", "wide screen video"))
         extra = [k for k in body if isinstance(k, str) and k.startswith("ref_image_") and k != "ref_image_0"]
         want = [f"ref_image_{i}" for i in range(1, len(extra) + 1)]
         if sorted(extra) != want or len(extra) > MAX_EXTRA_IMAGES:

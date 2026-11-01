@@ -7,11 +7,12 @@ calls a client of that API already makes, so a client needs a base URL and a tok
     GET  /api/v1/comfyui/comfyui_workflow/result/{task_id}  -> {"code":"Success","data":{"status":QUEUED|RUNNING|SUCCESS|FAILED,
                                                                 "results":[{"url":...,"type":"video","file_type":"mp4"}]}}
     GET  /health[?nonce=X]                                  -> {"ok":bool,"comfy":bool,"busy":N,"worker":"alive"|"dead","card":"NVIDIA ..., 49140 MiB"|"unknown",
-                                                                "memory_mib":49140|null,"voice":bool [,"proof":HMAC-SHA256(token, X) hex]}   (no token; `ok` is false when the worker thread is
+                                                                "memory_mib":49140|null,"vram_free_mib":N|null,"voice":bool,"t2v":bool [,"proof":HMAC-SHA256(token, X) hex]}   (no token; `ok` is false when the worker thread is
                                                                 dead; N = takes accepted and not yet over, plus finished ones not yet collected until
                                                                 GRACE_S after they finished: a caller shuts the box down only at 0. `card` is the GPU the
                                                                 box runs on, so a caller can check the box it declared; `memory_mib` is the first GPU's
-                                                                memory as a number, null when unknown; `voice` is true when indextts2-v1 is installed. `proof` lets a client that holds the token tell
+                                                                memory as a number, null when unknown; `vram_free_mib` is the free memory of ComfyUI's first device as ComfyUI's /system_stats
+                                                                says it (at most COMFY_CACHE_S old), null when ComfyUI is down or does not say; `voice` is true when indextts2-v1 is installed; `t2v` is true when this adapter serves minimax_h3_t2v (an adapter without it does not say, and refuses the workflow). `proof` lets a client that holds the token tell
                                                                 this adapter from another process holding the tunnel's port: it is answered only when the
                                                                 bind address is loopback, for a nonce of 16 to 64 lowercase hex characters, at most
                                                                 PROOF_PER_MIN a minute; on a widened bind there is no proof (it would be an offline
@@ -23,6 +24,8 @@ calls a client of that API already makes, so a client needs a base URL and a tok
     POST /cloudgpu/line {"label"}   -> {"data":{"ticket":ID,"state":"go"|"waiting","ahead":N,"running":LABEL|null,"lease_s":60}}   the line of callers that use this box
     GET  /cloudgpu/line/ID          -> the same; asking renews the ticket's lease (404: its lease ran out, or the adapter restarted: join again)
     DELETE /cloudgpu/line/ID        -> leave (idempotent)
+    POST /cloudgpu/free             -> {"data":{"freed":bool}}   ask ComfyUI to unload its models and free its GPU memory (token-checked, best effort; `freed` is false when a take is
+                                                                accepted or running, or ComfyUI did not answer: nothing is done then, and a caller ignores the answer)
     GET  /cloudgpu/line             -> {"data":{"line":[{"state","label","age_s"}],"lease_s":60}}: who runs and who waits (no ticket ids)
                                                                 (token-checked. A ticket is a place in an ordered line: "go" for the front one, so callers on DIFFERENT machines take the box one at a
                                                                 time in the order they joined. A ticket not asked about for LEASE_S is dropped, so a dead caller never blocks the line. The line
@@ -41,13 +44,18 @@ Workflows (the names autodl publishes, so a project's avatar.workflow keeps work
                                       FL2VA-free path: the reference-to-video model (ref2va) with the take's audio as <Audio 1>
     minimax_h3_lightx2v               prompt + first_frame + last_frame + duration + resolution (+ seed)
                                       Mode A: the FL2VA model speaks the prompt's line itself
+    minimax_h3_t2v                    prompt + duration + resolution (+ seed): text to video, no picture and no audio in; the FL2VA model (turbo lora) makes the picture and the sound
     resolution: "480p竖" 480x864 | "768p竖" 768x1344. 1080p is refused: it was never run on this card.
     indextts2-v1                      prompt_text + prompt_simple (the voice sample) + emo_control_method (+ emo_happy .. emo_calm, emo_ref_audio, emo_alpha, emo_random)
                                       the voice: IndexTTS2 run by tts_worker.py in its own Python environment (--tts-python, --tts-dir); the result is a wav
                                       (type "audio", file_type "wav"). Without a voice installed the box answers 400 and /health says "voice": false.
 Inputs are http(s) URLs or data: URIs. A URL that points at this machine or a private address is refused (this box is
-not a proxy into its own network). Both graphs are ComfyUI's own open templates (video_minimax_h3_r2v, video_minimax_h3_i2v),
-rebuilt as API graphs here; the box's other H3 workflows carry their author's lock and are not used.
+not a proxy into its own network). The graphs are ComfyUI's own open templates (video_minimax_h3_r2v, video_minimax_h3_i2v),
+rebuilt as API graphs here (text to video is the i2v one with both frame inputs left out); the box's other H3 workflows carry their author's lock and are not used.
+
+The H3 models live in the ComfyUI process, not in this adapter (standard library only, no torch), and ComfyUI keeps them on the card after a take. So after a take that leaves
+nothing accepted or queued, the adapter asks ComfyUI to free them (POST /free, best effort: a failure never fails a take). The next take loads its models again; FREE_AFTER_TAKE
+(--free-after-take 0|1, CLOUDGPU_FREE_AFTER_TAKE, default 1) turns this off for a box that only ever makes video.
 
 One GPU runs one take at a time (ComfyUI queues), so tasks, a voice included, are served in order by one worker. A task found QUEUED or RUNNING
 after a restart is FAILED ("restarted"), never silently re-run, its input files are deleted, and ComfyUI is told to interrupt and clear its queue so the
@@ -105,6 +113,7 @@ GRACE_S = 300                      # a finished take counts as busy this long un
 FFMPEG_TIMEOUT_S = 600
 SOCKET_TIMEOUT_S = 60              # a client that stalls this long loses its connection and its handler thread
 COMFY_CACHE_S, CARD_RETRY_S = 2, 60
+FREE_AFTER_TAKE = True             # after a take that leaves nothing waiting, ComfyUI is asked to unload its models (the next take loads them again)
 PROOF_PER_MIN = 30                 # answers with a `proof` per minute: a client asks about once a minute
 NONCE = re.compile(r"[0-9a-f]{16,64}")
 FPS = 24
@@ -127,7 +136,7 @@ LEASE_S = 60                       # a ticket nobody asked about for this long i
 MAX_LINE = 64
 LABEL_MAX = 80
 TTS_WORKFLOW = "indextts2-v1"
-WORKFLOWS = {"minimax_h3_image_audio_to_video": "ref", "minimax_h3_lightx2v": "fl", TTS_WORKFLOW: "tts"}
+WORKFLOWS = {"minimax_h3_image_audio_to_video": "ref", "minimax_h3_lightx2v": "fl", "minimax_h3_t2v": "t2v", TTS_WORKFLOW: "tts"}
 MAX_EXTRA_IMAGES = 8                # ref_image_1 .. ref_image_8 beside ref_image_0 (the hosted workflow takes up to 9 pictures)
 TTS_MAX_CHARS = 2000
 TTS_TIMEOUT_S = 900                # the model is loaded for each voice (its VRAM is given back after), so this includes the load
@@ -153,15 +162,15 @@ def frames_for(seconds: float) -> int:
 
 # ---- ComfyUI graph -------------------------------------------------------------------------------------------------
 
-def graph(kind: str, *, w: int, h: int, seconds: float, image: str, audio: str | None, prompt: str, seed: int, prefix: str,
+def graph(kind: str, *, w: int, h: int, seconds: float, image: str | None, audio: str | None, prompt: str, seed: int, prefix: str,
           extra_images: tuple | list = ()) -> dict:
-    lora, steps = MODELS["lora_" + kind], MODELS["steps_" + kind]
+    mk = "fl" if kind == "t2v" else kind            # text to video runs the FL2VA model and its lora, with no frames given
+    lora, steps = MODELS["lora_" + mk], MODELS["steps_" + mk]
     g = {
-        "1": {"class_type": "UNETLoader", "inputs": {"unet_name": MODELS["unet_" + kind], "weight_dtype": "default"}},
+        "1": {"class_type": "UNETLoader", "inputs": {"unet_name": MODELS["unet_" + mk], "weight_dtype": "default"}},
         "2": {"class_type": "CLIPLoader", "inputs": {"clip_name": MODELS["clip"], "type": "minimax", "device": "default"}},
         "3": {"class_type": "VAELoader", "inputs": {"vae_name": MODELS["vae_video"]}},
         "4": {"class_type": "VAELoader", "inputs": {"vae_name": MODELS["vae_audio"]}},
-        "5": {"class_type": "LoadImage", "inputs": {"image": image}},
         "8": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "res_multistep"}},
         "9": {"class_type": "RandomNoise", "inputs": {"noise_seed": seed}},
         "10": {"class_type": "BasicScheduler", "inputs": {"model": ["20", 0], "scheduler": "simple", "steps": steps, "denoise": 1.0}},
@@ -175,6 +184,8 @@ def graph(kind: str, *, w: int, h: int, seconds: float, image: str, audio: str |
         "20": {"class_type": "LoraLoaderModelOnly", "inputs": {"model": ["1", 0], "lora_name": lora, "strength_model": 1.0}},
     }
     n = frames_for(seconds)
+    if kind != "t2v":
+        g["5"] = {"class_type": "LoadImage", "inputs": {"image": image}}
     if kind == "ref":
         g["6"] = {"class_type": "LoadAudio", "inputs": {"audio": audio}}
         g["7"] = {"class_type": "MiniMaxH3ReferenceToVideo", "inputs": {
@@ -183,6 +194,9 @@ def graph(kind: str, *, w: int, h: int, seconds: float, image: str, audio: str |
         for i, name in enumerate(extra_images, 1):          # <Picture 2> is ref_image_1, and so on
             g[f"5r{i}"] = {"class_type": "LoadImage", "inputs": {"image": name}}
             g["7"]["inputs"][f"ref_images.ref_image_{i}"] = [f"5r{i}", 0]
+    elif kind == "t2v":
+        g["7"] = {"class_type": "MiniMaxH3ImageToVideo", "inputs": {
+            "clip": ["2", 0], "vae": ["3", 0], "prompt": prompt, "width": w, "height": h, "length": n}}
     else:
         g["7"] = {"class_type": "MiniMaxH3ImageToVideo", "inputs": {
             "clip": ["2", 0], "vae": ["3", 0], "prompt": prompt, "width": w, "height": h, "length": n,
@@ -352,7 +366,7 @@ def plan(workflow: str, body: dict) -> dict:
         if not all(body[k] for k in extra):
             raise Refused("an extra reference picture is empty")
     else:
-        for k in ("prompt", "first_frame", "last_frame"):
+        for k in ("prompt",) if kind == "t2v" else ("prompt", "first_frame", "last_frame"):
             if not body.get(k):
                 raise Refused(f"{k} is required")
         prompt = body["prompt"]
@@ -458,7 +472,8 @@ class Line:
 # ---- the server ------------------------------------------------------------------------------------------------------
 
 class Host:
-    def __init__(self, token: str, comfy: str, state: Path, comfy_root: Path, public_base: str = "", bind: str = "127.0.0.1", tts: dict | None = None):
+    def __init__(self, token: str, comfy: str, state: Path, comfy_root: Path, public_base: str = "", bind: str = "127.0.0.1", tts: dict | None = None,
+                 free_after_take: bool = FREE_AFTER_TAKE):
         if not token:
             raise ValueError("the token is empty: the adapter would answer anyone")
         self.token, self.comfy, self.state, self.root = token, comfy.rstrip("/"), state, comfy_root
@@ -468,6 +483,7 @@ class Host:
         self.out_dir.mkdir(parents=True, exist_ok=True)
         self.public_base = public_base.rstrip("/")
         self.line = Line()
+        self.free_after_take = free_after_take
         self.tts = tts                      # {"python", "dir", "worker"} when a voice is installed, else None
         self.q: queue.Queue = queue.Queue()
         self.lock = threading.Lock()
@@ -478,6 +494,7 @@ class Host:
         self._comfy = (0.0, False)
         self._card, self._card_lock, self._last_maintain = ("unknown", 0.0), threading.Lock(), 0.0
         self._mem_mib = None
+        self._vram_free = None              # ComfyUI's own count of the first device's free memory (MiB), from the /system_stats that comfy_up asks for
         self.proof_ok = loopback_bind(bind)     # on any other bind /health never answers `proof`
         self._proofs: list = []                 # when the last answers with a proof were made (the last minute)
         self.orphans = self.restarted()
@@ -647,6 +664,8 @@ class Host:
                 files.append(fetch(body["ref_audio_0"], inp, ("audio",), "ref_audio_0", self.files_dir))
                 for i in range(1, p.get("extra_images", 0) + 1):          # after the audio, so files[0] and files[1] mean what they always did
                     files.append(fetch(body[f"ref_image_{i}"], inp, ("image",), f"ref_image_{i}", self.files_dir))
+            elif p["kind"] == "t2v":
+                pass                        # nothing to fetch: the prompt is all there is
             else:
                 files.append(fetch(body["first_frame"], inp, ("image",), "first_frame", self.files_dir))
                 files.append(files[0] if body["last_frame"] == body["first_frame"]
@@ -713,8 +732,9 @@ class Host:
         wt = self.worker_thread
         alive = wt is not None and wt.is_alive()
         card = self.card()
-        d = {"ok": alive, "comfy": self.comfy_up(), "busy": self.busy(), "worker": "alive" if alive else "dead", "card": card,
-             "memory_mib": self._mem_mib if card != "unknown" else None, "voice": bool(self.tts), "files": 1}
+        up = self.comfy_up()
+        d = {"ok": alive, "comfy": up, "busy": self.busy(), "worker": "alive" if alive else "dead", "card": card,
+             "memory_mib": self._mem_mib if card != "unknown" else None, "vram_free_mib": self._vram_free if up else None, "voice": bool(self.tts), "files": 1, "t2v": True}
         if nonce and self.proof_ok and NONCE.fullmatch(nonce) and self._proof_allowed():
             d["proof"] = hmac.new(self.token.encode(), nonce.encode(), "sha256").hexdigest()
         return d
@@ -740,8 +760,12 @@ class Host:
         if time.time() - checked < COMFY_CACHE_S:       # /health is asked often and must not wait on ComfyUI each time
             return up
         try:
-            self.comfy_json("/system_stats", timeout=5)
+            stats = self.comfy_json("/system_stats", timeout=5)
             up = True
+            try:
+                self._vram_free = int(stats["devices"][0]["vram_free"]) // 2**20
+            except (KeyError, IndexError, TypeError, ValueError):
+                self._vram_free = None
         except (urllib.error.URLError, OSError, ValueError):
             up = False
         self._comfy = (time.time(), up)
@@ -795,6 +819,8 @@ class Host:
         if t and t["status"] in ("SUCCESS", "FAILED"):
             with self.lock:
                 self.holds[tid] = (time.time(), t.get("file_key"))
+        if self.free_after_take and t and t["plan"]["kind"] != "tts":       # a voice already freed ComfyUI before it ran
+            self.free_if_idle()
 
     def work(self, tid: str):
         t = self.load(tid)
@@ -827,7 +853,7 @@ class Host:
             time.sleep(3)
         p, files = t["plan"], t["inputs"]
         prefix = f"cloudgpu/{t['id']}"
-        g = graph(p["kind"], w=p["w"], h=p["h"], seconds=p["seconds"], image=files[0], audio=files[1] if p["kind"] == "ref" else None,
+        g = graph(p["kind"], w=p["w"], h=p["h"], seconds=p["seconds"], image=files[0] if files else None, audio=files[1] if p["kind"] == "ref" else None,
                   prompt=p["prompt"], seed=p["seed"], prefix=prefix, extra_images=files[2:] if p["kind"] == "ref" else ())
         if p["kind"] == "fl" and files[1] != files[0]:
             g["5b"]["inputs"]["image"] = files[1]
@@ -909,12 +935,23 @@ class Host:
         t["file_key"], t["file_ext"] = key, "wav"
         self.sweep()
 
-    def free_comfy(self):
-        """Best effort: ask ComfyUI to unload its models and free its memory (it may be down, or an older one without the call)."""
+    def free_comfy(self) -> bool:
+        """Best effort: ask ComfyUI to unload its models and free its memory (it may be down, or an older one without the call). True when it answered."""
         try:
             self.comfy_json("/free", {"unload_models": True, "free_memory": True}, timeout=10)
+            return True
         except (urllib.error.URLError, OSError, ValueError):
-            pass
+            return False
+
+    def free_if_idle(self) -> bool:
+        """Free ComfyUI's memory when no take is accepted or running and none is queued (a take that arrives meanwhile only waits for ComfyUI, which applies /free between its own jobs). Never raises."""
+        with self.lock:
+            if self.n_active > 0 or not self.q.empty():
+                return False
+        try:
+            return self.free_comfy()
+        except Exception:
+            return False
 
     def sweep(self):
         now = time.time()
@@ -1070,6 +1107,10 @@ def handler(host: Host):
             path = self.path.split("?")[0]
             if path == LINE:
                 return self._join_line()
+            if path == "/cloudgpu/free":
+                if not self._authed():
+                    return
+                return self._send(200, {"code": "Success", "data": {"freed": host.free_if_idle()}, "msg": ""})
             if not path.startswith(API + "/") or path.startswith(API + "/result/"):
                 return self._send(404, {"code": "NotFound", "data": None, "msg": ""})
             if not self._authed():
@@ -1110,6 +1151,8 @@ def main():
     ap.add_argument("--models", help="a JSON file of MODELS overrides (the keys at the top of this module)")
     ap.add_argument("--tts-python", default=os.environ.get("CLOUDGPU_TTS_PYTHON", ""), help="the Python of the IndexTTS2 environment (CLOUDGPU_TTS_PYTHON); the voice is served only with --tts-dir too")
     ap.add_argument("--tts-dir", default=os.environ.get("CLOUDGPU_TTS_DIR", ""), help="IndexTTS2's checkpoints folder, the one with config.yaml (CLOUDGPU_TTS_DIR)")
+    ap.add_argument("--free-after-take", type=int, choices=(0, 1), default=0 if os.environ.get("CLOUDGPU_FREE_AFTER_TAKE", "1").strip().lower() in ("0", "false", "no", "off") else 1,
+                    help="1 (default): after a take that leaves nothing waiting, ask ComfyUI to unload its models and free GPU memory (CLOUDGPU_FREE_AFTER_TAKE=0 turns it off)")
     ap.add_argument("--public-base", default=os.environ.get("CLOUDGPU_PUBLIC_BASE") or os.environ.get("H3HOST_PUBLIC_BASE", ""),
                     help="https://host:port the callers reach this server at; result URLs are built from it")
     a = ap.parse_args()
@@ -1124,7 +1167,7 @@ def main():
         raise SystemExit("set CLOUDGPU_TOKEN to a secret of at least 24 characters")
     worker = Path(__file__).resolve().with_name("tts_worker.py")
     tts = {"python": a.tts_python, "dir": a.tts_dir, "worker": worker} if a.tts_python and a.tts_dir and worker.is_file() and (Path(a.tts_dir) / "config.yaml").is_file() else None
-    host = Host(token, a.comfy, Path(a.state), Path(a.comfy_root), a.public_base, a.bind, tts)
+    host = Host(token, a.comfy, Path(a.state), Path(a.comfy_root), a.public_base, a.bind, tts, bool(a.free_after_take))
     host.start_worker()
     ThreadingHTTPServer((a.bind, a.port), handler(host)).serve_forever()
 

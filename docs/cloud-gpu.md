@@ -284,6 +284,19 @@ A caller that wants the memory now (before it starts another model on the card) 
 when a take is accepted or running, or ComfyUI did not answer. Callers can ignore the answer; asking works whatever the setting is. `vram_free_mib` in `/health` shows the effect. A caller waiting in the box's line
 does not hold the free back (it has no take yet): its take loads the models again. **Not measured:** how much of the 46 GB ComfyUI gives back on a real box (`/free` also depends on the ComfyUI version).
 
+## How much a box works: `util` (0.14.0)
+
+A consumer's own wall clock cannot say whether the box is the bottleneck: a take that took 143 s on the consumer's side may have been 40 s on the box, with a new one reaching it only every few minutes.
+`python3 -m cloudgpu util [--since TIME] [BOX...]` reads each box's task records and prints, per box and workflow, the number of takes and how many failed, the time from creation to done (median and
+slowest, of the takes that went well), the median and mean gap between consecutive creations, the busy share (the part of the span, first creation to last finish, in which a take was running on the
+box), and the takes of the last 30 minutes. `TIME` is `90m`, `2h`, `1d`, a local date or date and time (`2026-10-29T14:30`) or seconds since 1970, so a change on the consumer's side can be judged by
+running it before and after. `BOX` is a name in `CLOUDGPU_POOL` (`default` for a pool of one); none means all. The JSON is on stdout (one row per box and workflow, or a row with an `error` for a box that
+does not answer); one line a person can read per row goes to stderr. It only reads: it powers nothing on, opens no tunnel and never touches a running take.
+
+The records come from the adapter's new `GET /cloudgpu/tasks[?since=EPOCH]` (token-checked, read only; there was no way to list them before). It gives `workflow`, `status`, `created`, `started`, `done` of
+each record and no task id. The adapter keeps a record for 24 h, so a report reaches back a day at most, and the adapter has to be installed on the box again (`bundle`, `install.sh`) for this: against an
+older one `util` says so. The statistics are `cloudgpu.util.report(records, now, since)`, a pure function.
+
 ## An allowance for an agent: renting its own boxes (0.11.0)
 
 By default an agent rents nothing: `create` and `release` are a person's, as above. A person can give an agent a limit to work inside, and then the agent may keep boxes up by itself.

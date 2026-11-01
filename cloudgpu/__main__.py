@@ -1,4 +1,4 @@
-"""python3 -m cloudgpu COMMAND: status (read only), hold / release (a person's hold on a box), instances (the cloud account: list, status, snapshot read; power, create, release only with --yes), price, bench (a paid take), bundle (what to copy onto a box)."""
+"""python3 -m cloudgpu COMMAND: status and util (read only), hold / release (a person's hold on a box), instances (the cloud account: list, status, snapshot read; power, create, release only with --yes), price, bench (a paid take), bundle (what to copy onto a box)."""
 
 from __future__ import annotations
 
@@ -188,6 +188,9 @@ def main(argv: list[str] | None = None) -> int:
     sub = ap.add_subparsers(dest="cmd", required=True)
     st = sub.add_parser("status", help="where the box stands (read only)")
     st.add_argument("--env-file", help="read the settings from this KEY=value file instead of the environment (it warns when other users can read it)")
+    ut = sub.add_parser("util", help="how much each box works, from its task records (read only): takes, time per take, gap between takes, busy share")
+    ut.add_argument("box", nargs="*", help="box names in CLOUDGPU_POOL (default: all; `default` is a pool of one)")
+    ut.add_argument("--since", help="only takes created after this: 90m, 2h, 1d, 2026-10-29, 2026-10-29T14:30 or seconds since 1970 (the box keeps a day of records)")
     ins = sub.add_parser("instances", help="the cloud account: list, status, snapshot, specs (read); power-on, power-off, create, release (only with --yes)")
     ins.add_argument("--vendor", help="a cloud vendor (default: CLOUDGPU_VENDOR, CLOUDGPU_POWER, else autodl)")
     isub = ins.add_subparsers(dest="icmd", required=True)
@@ -253,6 +256,19 @@ def main(argv: list[str] | None = None) -> int:
                 return 2
         print(json.dumps(status(env, a.env_file), ensure_ascii=False))
         return 0
+    if a.cmd == "util":
+        from . import util
+        from .errors import CloudGpuError
+        from .pool import boxes_from
+        try:
+            rows, lines = util.run(boxes_from(os.environ), a.since, a.box)
+        except CloudGpuError as e:
+            print(json.dumps({"error": e.message, "kind": e.kind, "next": e.next}, ensure_ascii=False))
+            return 2
+        print(json.dumps({"util": rows, "since": a.since}, ensure_ascii=False))
+        for ln in lines:
+            print(ln, file=sys.stderr)                   # the JSON is stdout alone; a person reads these
+        return 0 if all("error" not in r for r in rows) else 1
     if a.cmd in ("hold", "release"):
         from . import hold
         from .errors import CloudGpuError

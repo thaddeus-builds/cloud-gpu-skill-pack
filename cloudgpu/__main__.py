@@ -50,8 +50,12 @@ def instances(a, out=print) -> int:
             _say(expiry.alerts(prow.values()))
         elif c == "expiry":
             rs = expiry.account_rows(v, only=set(a.ids) or None, days=_days(a))
-            out(json.dumps({"warn_days": _days(a), "level": expiry.worst(rs), "passes": rs, "alerts": [r["message"] for r in expiry.alerts(rs)]}, ensure_ascii=False))
-            return {"ok": 0, "info": 0, "warn": 1, "error": 2}[expiry.worst(rs)]
+            doc = {"warn_days": _days(a), "level": expiry.worst(rs), "passes": rs, "alerts": [r["message"] for r in expiry.alerts(rs)]}
+            lost = sorted(set(a.ids) - {r["id"] for r in rs})        # a named id that is no pass: a typo, an hourly box, or a pass the vendor dropped after it ended
+            for i in lost:
+                doc["alerts"].append(f"{i} is not a pass of this account (a mistyped id, a box paid by the hour, or a pass the vendor no longer lists): check it in the console")
+            out(json.dumps({**doc, **({"level": "warn"} if lost and doc["level"] in ("ok", "info") else {}), "not_passes": lost}, ensure_ascii=False))
+            return 1 if lost and expiry.worst(rs) != "error" else {"ok": 0, "info": 0, "warn": 1, "error": 2}[expiry.worst(rs)]
         elif c == "status":
             doc = {"id": a.id, "status": v.status(a.id)}
             try:                                                    # a pass's end: one more read of the account; the status stands without it
@@ -118,8 +122,16 @@ def instances(a, out=print) -> int:
 
 
 def _days(a) -> float:
+    """--warn-days when given (it must be a number above 0, as the setting must), else the setting."""
+    import math
     from . import expiry
-    return a.warn_days if getattr(a, "warn_days", None) else expiry.warn_days()
+    from .errors import CloudGpuError
+    d = getattr(a, "warn_days", None)
+    if d is None:
+        return expiry.warn_days()
+    if not (math.isfinite(d) and d > 0):
+        raise CloudGpuError("unknown", "--warn-days must be a number of days above 0")
+    return d
 
 
 def _say(alerts) -> None:

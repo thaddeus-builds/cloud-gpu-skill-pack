@@ -16,6 +16,7 @@ A pay-as-you-go instance never has a row: it has no end.
 
 from __future__ import annotations
 
+import re
 import time
 from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
@@ -45,7 +46,7 @@ def parse_time(text: str | None) -> float | None:
     if not text:
         return None
     try:
-        t = datetime.fromisoformat(str(text).strip().replace("Z", "+00:00"))
+        t = datetime.fromisoformat(re.sub(r"(\.\d+)", lambda m: (m.group(1) + "000000")[:7], str(text).strip().replace("Z", "+00:00"), count=1))      # python 3.9 takes 3 or 6 fraction digits only
     except ValueError:
         return None
     if t.tzinfo is None:
@@ -53,9 +54,14 @@ def parse_time(text: str | None) -> float | None:
     return t.timestamp()
 
 
-def hours_left(ends: str | None, now: float | None = None) -> float | None:
+def _hours(ends: str | None, now: float | None = None) -> float | None:
     t = parse_time(ends)
-    return None if t is None else round((t - (time.time() if now is None else now)) / 3600, 1)
+    return None if t is None else (t - (time.time() if now is None else now)) / 3600
+
+
+def hours_left(ends: str | None, now: float | None = None) -> float | None:
+    h = _hours(ends, now)
+    return None if h is None else round(h, 1)
 
 
 def _left(h: float) -> str:
@@ -68,7 +74,7 @@ def row(i: Instance, now: float | None = None, days: float = DEFAULT_WARN_DAYS, 
         return None
     who = f"the {vendor} console" if vendor else "the vendor's console"
     label = f"{i.id}" + (f" ({i.name})" if i.name else "") + f", a {i.billing} pass"
-    h = hours_left(i.ends, now)
+    h = _hours(i.ends, now)                     # not rounded: a pass that ended two minutes ago has ended
     off = i.status in OFF_STATUS
     if h is None:
         level, state = "warn", "no_end"
@@ -85,14 +91,14 @@ def row(i: Instance, now: float | None = None, days: float = DEFAULT_WARN_DAYS, 
     else:
         level, state = "ok", "active"
         msg = f"{label}, runs until {i.ends} (in {_left(h)})"
-    return {"id": i.id, "name": i.name, "billing": i.billing, "status": i.status, "ends": i.ends, "hours_left": h,
+    return {"id": i.id, "name": i.name, "billing": i.billing, "status": i.status, "ends": i.ends, "hours_left": None if h is None else round(h, 1),
             "days_left": None if h is None else round(h / 24, 1), "level": level, "state": state, "message": msg, "who": WHO if level in ("warn", "error") and state != "off" else None}
 
 
 def rows(instances, now: float | None = None, days: float = DEFAULT_WARN_DAYS, vendor: str = "", only=None) -> list[dict]:
     """Rows of the passes among `instances` (only those whose id is in `only`, when given), the ones that end soonest first."""
     out = [r for i in instances if (only is None or i.id in only) for r in [row(i, now, days, vendor)] if r]
-    return sorted(out, key=lambda r: (r["hours_left"] is None, r["hours_left"] if r["hours_left"] is not None else 0))
+    return sorted(out, key=lambda r: (r["hours_left"] is None, r["hours_left"] or 0))
 
 
 def alerts(rs) -> list[dict]:

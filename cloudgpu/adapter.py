@@ -32,6 +32,10 @@ calls a client of that API already makes, so a client needs a base URL and a tok
                                                                 orders the callers that use it; a caller that submits without a ticket still queues in the worker as before. While a ticket is live
                                                                 the box counts as busy in /health, so it is not powered off or restarted under a caller that waits.)
 
+    GET  /cloudgpu/tasks[?since=EPOCH]  -> {"data":{"tasks":[{"workflow","status","created","started","done"}],"now":EPOCH,"ttl_s":86400}}   what `python3 -m cloudgpu util` reads (0.12.0)
+                                                                (token-checked, read only. The task records of the last TASK_TTL_S, newest last; `done` is when the take finished (the file's
+                                                                modification time for one the adapter failed itself), null while it waits or runs; no task id and nothing a take carried.)
+
     Authorization: <CLOUDGPU_TOKEN>    the raw token, as autodl's own header (no "Bearer"); compared in constant time.
 
 Workflows (the names autodl publishes, so a project's avatar.workflow keeps working):
@@ -127,6 +131,7 @@ MODELS = {
     "vae_audio": "MiniMax/minimax_h3_audio_vae_fp32.safetensors",
 }
 LINE = "/cloudgpu/line"
+TASKS = "/cloudgpu/tasks"
 LEASE_S = 60                       # a ticket nobody asked about for this long is dropped; a caller asks about every LEASE_S / 3
 MAX_LINE = 64
 LABEL_MAX = 80
@@ -547,6 +552,23 @@ class Host:
             for t, (_, k) in list(self.holds.items()):
                 if t == tid or (key and k == key):
                     del self.holds[t]
+
+    def records(self, since: float = 0.0) -> list:
+        """What `util` reads: one small dict per task record created at or after `since` (no id, no plan, no input), oldest first. `done` is `finished`, else the record file's
+        modification time for a take that is over, else None. Read only."""
+        out = []
+        for p in self.tasks_dir.glob("*.json"):
+            t = self.load(p.stem)
+            if not isinstance(t, dict) or not isinstance(t.get("created"), (int, float)) or t["created"] < since:
+                continue
+            done = t.get("finished")
+            if done is None and t.get("status") in ("SUCCESS", "FAILED"):
+                try:
+                    done = p.stat().st_mtime
+                except OSError:
+                    pass
+            out.append({"workflow": t.get("workflow"), "status": t.get("status"), "created": t["created"], "started": t.get("started"), "done": done})
+        return sorted(out, key=lambda r: r["created"])
 
     def restarted(self) -> int:
         n = 0
@@ -1031,6 +1053,14 @@ def handler(host: Host):
                 if d is None:
                     return self._send(404, {"code": "NotFound", "data": None, "msg": "no such ticket: its lease ran out or the adapter restarted; join again"})
                 return self._send(200, {"code": "Success", "data": d, "msg": ""})
+            if path == TASKS:
+                if not self._authed():
+                    return
+                try:
+                    since = float(urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("since", ["0"])[0])
+                except ValueError:
+                    return self._send(400, {"code": "RequestParameterIsWrong", "data": None, "msg": "since is a number of seconds since 1970"})
+                return self._send(200, {"code": "Success", "data": {"tasks": host.records(since), "now": time.time(), "ttl_s": TASK_TTL_S}, "msg": ""})
             if path.startswith(API + "/result/"):
                 if not self._authed():
                     return

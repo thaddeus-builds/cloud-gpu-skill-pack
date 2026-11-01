@@ -175,7 +175,7 @@ python3 -m cloudgpu release BOX
 
 A hold is one small file per box in `CLOUDGPU_STATE_DIR` (default `~/.cloudgpu/holds/`), so it works across processes and restarts and **ends by itself at its time** (at most 480 minutes; someone
 else's active hold is not replaced, your own is extended). `Pool.take` counts a held box as busy and uses another; when every box it may use is held (a pool of one, or a take sent earlier that must
-return to its box) it waits, saying `waiting for the hold on BOX by NAME until HH:MM` once on stderr (or through `Pool(on_wait=fn)`), and goes when the hold ends. `Pool.power_off_if_idle` leaves a held
+return to its box) it waits, saying `waiting for the hold on BOX by NAME until HH:MM` once on stderr (or through `Pool(on_wait=fn)`), and goes when the hold ends. The default `on_wait` (stderr) says a wait at once and then one line per `wait_say_every_s` (default 180 s) with the wait so far (`... (still waiting, 200 s)`); a function passed as `on_wait` gets every change of the text, as before. `Pool.power_off_if_idle` leaves a held
 box on. `python3 -m cloudgpu status` lists the active holds. **Limit:** a hold governs callers that go through `Pool`; someone who talks to ComfyUI directly is not stopped, and a hold on a box
 does not stop a take already running on it. 
 

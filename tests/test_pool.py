@@ -134,6 +134,31 @@ def test_when_every_box_is_held_the_take_waits_says_so_once_and_goes_when_the_ho
         assert len(said) == 1 and "waiting for the hold on a by pat until" in said[0], said
 
 
+def test_the_default_wait_says_the_first_text_at_once_then_one_line_per_interval_with_the_wait_so_far():
+    import contextlib
+    import io
+    with _t.tmpdir() as d:
+        now = [1000.0]
+        err = io.StringIO()
+        one = Pool([("", FakeBox())], poll=0.01, state_dir=tempfile.mkdtemp(), now=lambda: now[0], clock=lambda: now[0])
+        one._sleep = lambda s: now.__setitem__(0, now[0] + 60)                   # each wait of the pool is a minute of both clocks
+        hold.place(one._state_dir, "", 10, "pat", now=now[0])
+        with contextlib.redirect_stderr(err):
+            with one.take(Path(d) / "x"):
+                pass
+        lines = err.getvalue().splitlines()
+        assert len(lines) == 4 and "(still waiting" not in lines[0], lines
+        assert [l.rsplit("(", 1)[1] for l in lines[1:]] == ["still waiting, 180 s)", "still waiting, 360 s)", "still waiting, 540 s)"], lines
+        mine = []                                                                # a caller's own on_wait is unchanged: said once for the one text
+        now[0] = 5000.0
+        own = Pool([("", FakeBox())], poll=0.01, state_dir=tempfile.mkdtemp(), now=lambda: now[0], clock=lambda: now[0], on_wait=mine.append)
+        own._sleep = lambda s: now.__setitem__(0, now[0] + 60)
+        hold.place(own._state_dir, "", 10, "pat", now=now[0])
+        with own.take(Path(d) / "y"):
+            pass
+        assert len(mine) == 1 and "still waiting" not in mine[0], mine
+
+
 def test_a_pool_of_one_a_pinned_take_and_a_held_only_box_wait_too_and_no_hold_is_no_wait():
     with _t.tmpdir() as d:
         now = [1000.0]

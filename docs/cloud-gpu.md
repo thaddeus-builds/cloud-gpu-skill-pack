@@ -106,10 +106,11 @@ reads only `<Picture 1>`, so a caller that sends extra pictures should send its 
 the large print on a held pack is legible, small print is not. **Not measured:** the 32 GB card (4080 SUPER) with extra pictures: it held 31 GB with one picture, so it may run out of memory.
 A third workflow, `indextts2-v1`, is the voice (0.6.0, below): the same call as the hosted one, the result a wav.
 
-`GET /health` (no token) answers `{"ok", "comfy", "busy", "worker": "alive"|"dead", "card", "memory_mib", "voice"}` and, when asked with `?nonce=`, a `proof`. `ok` is false when the worker thread is dead. `busy` counts
+`GET /health` (no token) answers `{"ok", "comfy", "busy", "worker": "alive"|"dead", "card", "memory_mib", "vram_free_mib", "voice"}` and, when asked with `?nonce=`, a `proof`. `ok` is false when the worker thread is dead. `busy` counts
 a take from the moment it is accepted (while its inputs are still being fetched) until it is over **and collected** (the video downloaded, or the failure read), or 300 s after it finished.
 `card` is the GPU the box runs on, as `nvidia-smi` names it with its memory (`NVIDIA GeForce RTX 4090, 49140 MiB`; `unknown` when it cannot say); `memory_mib` is the first card's memory as a number (`null` when unknown), so a consumer can check the size without parsing text: compare it with the box you declared
-(`CLOUDGPU_BOX`); `python3 -m cloudgpu status` does and says so in `next` when they differ. `voice` is true when the box has the voice installed. From 0.7.0 a caller waiting in the box's line also counts in `busy`.
+(`CLOUDGPU_BOX`); `python3 -m cloudgpu status` does and says so in `next` when they differ. `vram_free_mib` is the free memory of ComfyUI's first device as ComfyUI itself reports it (`null` when ComfyUI is down or does not say), so a consumer can see whether a second model fits
+before it loads it. `voice` is true when the box has the voice installed. From 0.7.0 a caller waiting in the box's line also counts in `busy`.
 
 Errors are `CloudGpuError` with `kind`: `key_missing` (a setting or a key file is not right), `http` (a vendor API answered no), `unknown` (not a backend), `down` (the box
 does not answer and nothing can start it), `timeout` (it did not come up); `next` lists what a person can do.
@@ -266,6 +267,19 @@ goes. It says `waiting for its turn on BOX: 2 take(s) of other machines ahead (h
 and not waited for: the take goes as before, and the adapter's own queue still serves it in order of arrival. The line is in the adapter's memory: an adapter restart forgets it (a restart already fails every
 waiting take), and a caller whose ticket was forgotten joins again at the back. A ticket's label (this machine's name and the take's folder name) is sent to the box. A hold (above) is still per machine. Out of scope, as before:
 autoscaling, or powering more boxes on to shorten a line.
+
+## Giving the card's memory back after a take (0.13.0)
+
+The picture models live in the ComfyUI process, not in the adapter (which is standard library only and has no torch), and ComfyUI keeps them on the card after a take: an idle box measured
+46735 of 49140 MiB used, so a second model (the VoxCPM voice needs about 6 GB) could not load next to it. So after a take that leaves nothing accepted or queued, the adapter asks ComfyUI to unload its models
+and free its memory (`POST /free` with `unload_models` and `free_memory`, the call the IndexTTS2 voice already makes before it runs). It is best effort: ComfyUI down, an older ComfyUI or a timeout never fails a take.
+A take that is accepted or running holds it back, so a queue of takes frees once, after the last one. It is done after a failed take too (an out-of-memory take leaves the most behind).
+
+**The cost:** the next take loads its models again (the H3 weights are several GB: seconds to a minute or more, measure it on your box). **Turn it off** (`CLOUDGPU_FREE_AFTER_TAKE=0` in the environment of
+`start.sh`, or `--free-after-take 0`) on a box that only makes video and nothing else uses the card, or where takes come minutes apart in bursts you would rather keep warm. Default on.
+A caller that wants the memory now (before it starts another model on the card) can also ask: `POST /cloudgpu/free` (token-checked, like every call but `/health`) answers `{"data":{"freed":bool}}`; `freed` is false
+when a take is accepted or running, or ComfyUI did not answer. Callers can ignore the answer; asking works whatever the setting is. `vram_free_mib` in `/health` shows the effect. A caller waiting in the box's line
+does not hold the free back (it has no take yet): its take loads the models again. **Not measured:** how much of the 46 GB ComfyUI gives back on a real box (`/free` also depends on the ComfyUI version).
 
 ## An allowance for an agent: renting its own boxes (0.11.0)
 

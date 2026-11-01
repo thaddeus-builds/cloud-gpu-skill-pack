@@ -178,6 +178,18 @@ def test_a_pool_of_one_a_pinned_take_and_a_held_only_box_wait_too_and_no_hold_is
             assert box is boxes[1][1] and now[0] >= t0 + 120, "the box that holds the sent take is held: no other box can serve it, so it waits"
 
 
+def test_a_pool_of_one_named_box_writes_the_pin_file_and_an_unnamed_one_none():
+    with _t.tmpdir() as d:
+        named = Pool([("b", FakeBox())], poll=0.01, state_dir=tempfile.mkdtemp())
+        with named.take(Path(d) / "t1"):
+            pass
+        assert (Path(d) / "t1" / PIN_FILE).read_text() == "b"
+        plain = Pool([("", FakeBox())], poll=0.01, state_dir=tempfile.mkdtemp())
+        with plain.take(Path(d) / "t2"):
+            pass
+        assert not (Path(d) / "t2" / PIN_FILE).exists()
+
+
 def test_an_all_down_pool_still_raises_and_a_held_box_is_not_powered_off():
     with _t.tmpdir() as d:
         pool, boxes = pool_of(False, False)

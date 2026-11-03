@@ -7,12 +7,15 @@ calls a client of that API already makes, so a client needs a base URL and a tok
     GET  /api/v1/comfyui/comfyui_workflow/result/{task_id}  -> {"code":"Success","data":{"status":QUEUED|RUNNING|SUCCESS|FAILED,
                                                                 "results":[{"url":...,"type":"video","file_type":"mp4"}]}}
     GET  /health[?nonce=X]                                  -> {"ok":bool,"comfy":bool,"busy":N,"worker":"alive"|"dead","card":"NVIDIA ..., 49140 MiB"|"unknown",
-                                                                "memory_mib":49140|null,"vram_free_mib":N|null,"voice":bool,"t2v":bool [,"proof":HMAC-SHA256(token, X) hex]}   (no token; `ok` is false when the worker thread is
+                                                                "memory_mib":49140|null,"vram_free_mib":N|null,"voice":bool,"t2v":bool,"audio_lock":[...],"audio_lock_detail":{...} [,"proof":HMAC-SHA256(token, X) hex]}   (no token; `ok` is false when the worker thread is
                                                                 dead; N = takes accepted and not yet over, plus finished ones not yet collected until
                                                                 GRACE_S after they finished: a caller shuts the box down only at 0. `card` is the GPU the
                                                                 box runs on, so a caller can check the box it declared; `memory_mib` is the first GPU's
                                                                 memory as a number, null when unknown; `vram_free_mib` is the free memory of ComfyUI's first device as ComfyUI's /system_stats
-                                                                says it (at most COMFY_CACHE_S old), null when ComfyUI is down or does not say; `voice` is true when indextts2-v1 is installed; `t2v` is true when this adapter serves minimax_h3_t2v (an adapter without it does not say, and refuses the workflow). `proof` lets a client that holds the token tell
+                                                                says it (at most COMFY_CACHE_S old), null when ComfyUI is down or does not say; `voice` is true when indextts2-v1 is installed; `t2v` is true when this adapter serves minimax_h3_t2v (an adapter without it does not say, and refuses the workflow). `audio_lock` lists the `lock`
+                                                                values of minimax_h3_image_audio_locked this box serves RIGHT NOW (["addguide"], ["addguide","audiodrive"], or [] when ComfyUI has no usable lock node or
+                                                                has not answered yet; an adapter older than 0.20.0 has no such key and refuses the workflow); `audio_lock_detail` says per lock whether its node
+                                                                was found in ComfyUI's /object_info, where it comes from (module, pack, commit) and, for audiodrive, whether the operator switched it on. `proof` lets a client that holds the token tell
                                                                 this adapter from another process holding the tunnel's port: it is answered only when the
                                                                 bind address is loopback, for a nonce of 16 to 64 lowercase hex characters, at most
                                                                 PROOF_PER_MIN a minute; on a widened bind there is no proof (it would be an offline
@@ -42,6 +45,7 @@ Workflows (the names autodl publishes, so a project's avatar.workflow keeps work
     minimax_h3_image_audio_to_video   ref_image_0 (+ ref_image_1 .. ref_image_8) + ref_audio_0 + audio_duration + resolution
                                       more pictures are <Picture 2>, <Picture 3> .. in the prompt (no gaps in the numbering); with no prompt given the default is used
                                       FL2VA-free path: the reference-to-video model (ref2va) with the take's audio as <Audio 1>
+    minimax_h3_image_audio_locked     the same fields as minimax_h3_image_audio_to_video + lock: "addguide" (default) | "audiodrive"; the audio on the lips is the take's audio (0.20.0, below)
     minimax_h3_lightx2v               prompt + first_frame + last_frame + duration + resolution (+ seed)
                                       Mode A: the FL2VA model speaks the prompt's line itself
     minimax_h3_t2v                    prompt + duration + resolution (+ seed): text to video, no picture and no audio in; the FL2VA model (turbo lora) makes the picture and the sound
@@ -52,6 +56,16 @@ Workflows (the names autodl publishes, so a project's avatar.workflow keeps work
 Inputs are http(s) URLs or data: URIs. A URL that points at this machine or a private address is refused (this box is
 not a proxy into its own network). The graphs are ComfyUI's own open templates (video_minimax_h3_r2v, video_minimax_h3_i2v),
 rebuilt as API graphs here (text to video is the i2v one with both frame inputs left out); the box's other H3 workflows carry their author's lock and are not used.
+
+The audio-locked workflow (0.20.0). The unlocked audio-driven graph lets the model REGENERATE speech from the audio it is given (measured on a 4090: sample correlation with the given audio
+0.23 to 0.39). minimax_h3_image_audio_locked builds the same graph and adds one node that anchors the take's own audio, chosen by the request's `lock`:
+    addguide    (default) the OFFICIAL ComfyUI node MiniMaxH3AddGuide (comfy_extras.nodes_minimax_h3): the audio is encoded as a guide on the conditioning; the audio of the video is decoded from the sampled latent as before
+    audiodrive  the THIRD-PARTY node VRGDG_MiniMaxH3AudioDrive (a custom-node pack under a licence that is NOT open: see docs/cloud-gpu.md). OFF unless the box's operator sets CLOUDGPU_ALLOW_NODE_VRGDG=1
+    custom      reserved for a future graph of official nodes only; not implemented, always refused
+The adapter never falls back from a lock to the unlocked graph or to another lock: a lock whose node ComfyUI does not have, or which the operator has not allowed, is a coded error (400 on the
+take; a take accepted while ComfyUI was still starting and then found without the node is FAILED with the same words), the words starting `lock_unknown`, `lock_not_implemented`,
+`lock_wrong_workflow`, `lock_not_allowed`, `lock_node_missing`, `lock_node_incompatible` or `lock_state_unknown`. The nodes are found by name in ComfyUI's /object_info at start and again when asked
+(/health: at most LOCK_CACHE_S old; read afresh for each take of a lock, at the door and again when it runs); no model file name is written in the lock code: the models are the box's MODELS as for every graph.
 
 The H3 models live in the ComfyUI process, not in this adapter (standard library only, no torch), and ComfyUI keeps them on the card after a take. So after a take that leaves
 nothing accepted or queued, the adapter asks ComfyUI to free them (POST /free, best effort: a failure never fails a take). The next take loads its models again; FREE_AFTER_TAKE
@@ -85,6 +99,7 @@ import secrets
 import shutil
 import socket
 import subprocess
+import sys
 import threading
 import time
 import urllib.error
@@ -136,7 +151,20 @@ LEASE_S = 60                       # a ticket nobody asked about for this long i
 MAX_LINE = 64
 LABEL_MAX = 80
 TTS_WORKFLOW = "indextts2-v1"
-WORKFLOWS = {"minimax_h3_image_audio_to_video": "ref", "minimax_h3_lightx2v": "fl", "minimax_h3_t2v": "t2v", TTS_WORKFLOW: "tts"}
+LOCKED_WORKFLOW = "minimax_h3_image_audio_locked"           # the audio-driven take whose audio is anchored to the given one (0.20.0); the unlocked one stays as it was
+WORKFLOWS = {"minimax_h3_image_audio_to_video": "ref", LOCKED_WORKFLOW: "ref", "minimax_h3_lightx2v": "fl", "minimax_h3_t2v": "t2v", TTS_WORKFLOW: "tts"}
+LOCKS = ("addguide", "audiodrive", "custom")                # the values of `lock`; "addguide" is the default
+DEFAULT_LOCK = "addguide"
+CUSTOM_WORDS = "lock_not_implemented: lock=custom is reserved for a future lock made of official ComfyUI nodes only; it is not served yet (use addguide)"
+LOCK_NODES = {"addguide": "MiniMaxH3AddGuide",                      # the official node: ComfyUI's comfy_extras.nodes_minimax_h3
+              "audiodrive": "VRGDG_MiniMaxH3AudioDrive"}            # third party; "custom" has no node (an extension point: LOCK_BUILDERS, below)
+# The inputs each graph below wires, by the names of the node definitions: a node whose /object_info lacks one is "present but incompatible", never used.
+LOCK_INPUTS = {"addguide": ("positive", "latent", "frame_idx", "vae", "audio_vae", "audio"),
+               "audiodrive": ("av_latent", "source_audio", "audio_vae")}
+ENV_ALLOW_VRGDG = "CLOUDGPU_ALLOW_NODE_VRGDG"               # the operator's switch for the third-party lock: off unless set to 1/true/yes/on
+VRGDG_LICENCE = "VRGameDevGirl Community and Commercial License v1.0"
+VRGDG_TAG = "third-party, licence-restricted"
+LOCK_CACHE_S = 30                                           # how long a read of ComfyUI's node list is trusted (a node appears only when ComfyUI restarts)
 MAX_EXTRA_IMAGES = 8                # ref_image_1 .. ref_image_8 beside ref_image_0 (the hosted workflow takes up to 9 pictures)
 TTS_MAX_CHARS = 2000
 TTS_TIMEOUT_S = 900                # the model is loaded for each voice (its VRAM is given back after), so this includes the load
@@ -154,6 +182,11 @@ class Refused(Exception):
     """A request the box will not run: answered 400 with this text, nothing queued."""
 
 
+class LockUnavailable(RuntimeError):
+    """A lock the box cannot serve (reserved, not allowed, its node missing): a coded message (`lock_...: words`). Raised where the take is already accepted (at run time);
+    at the door the same words are a Refused."""
+
+
 def frames_for(seconds: float) -> int:
     """The templates' own rule: at least 5 frames and 5 mod 17."""
     n = max(5, round(seconds * FPS))
@@ -163,7 +196,7 @@ def frames_for(seconds: float) -> int:
 # ---- ComfyUI graph -------------------------------------------------------------------------------------------------
 
 def graph(kind: str, *, w: int, h: int, seconds: float, image: str | None, audio: str | None, prompt: str, seed: int, prefix: str,
-          extra_images: tuple | list = ()) -> dict:
+          extra_images: tuple | list = (), lock: str | None = None) -> dict:
     mk = "fl" if kind == "t2v" else kind            # text to video runs the FL2VA model and its lora, with no frames given
     lora, steps = MODELS["lora_" + mk], MODELS["steps_" + mk]
     g = {
@@ -202,7 +235,46 @@ def graph(kind: str, *, w: int, h: int, seconds: float, image: str | None, audio
             "clip": ["2", 0], "vae": ["3", 0], "prompt": prompt, "width": w, "height": h, "length": n,
             "first_frame": ["5", 0], "last_frame": ["5b", 0]}}
         g["5b"] = {"class_type": "LoadImage", "inputs": {"image": image}}
+    if lock is not None:                    # only the audio-locked workflow passes a lock; every other graph is exactly what it was
+        if kind != "ref":
+            raise LockUnavailable(f"lock_wrong_workflow: a lock anchors the audio of an audio-driven take; kind {kind!r} has none")
+        builder = LOCK_BUILDERS.get(lock)
+        if builder is None:
+            raise LockUnavailable(f"lock_unknown: lock {lock!r} is not one of {', '.join(LOCKS)}")
+        builder(g)                          # no else, no fallback: a lock that cannot be built stops the take
     return g
+
+
+# ---- the locks of minimax_h3_image_audio_locked (0.20.0) ----------------------------------------------------------------
+# Each builder changes the finished audio-driven graph `g` in place and nothing else. The graph has the nodes 7 (MiniMaxH3ReferenceToVideo: conditioning 0, audio-video latent 1),
+# 6 (LoadAudio, also wired into the reference node as <Audio 1>), 4 (the audio VAE), 3 (the video VAE), 11 (the guider), 12 (the sampler), 14 (VAEDecodeAudio) and 15 (CreateVideo).
+
+def lock_addguide(g: dict) -> None:
+    """The official node MiniMaxH3AddGuide (ComfyUI core, comfy_extras.nodes_minimax_h3): its inputs are positive and latent (required), frame_idx (0: from the first frame) and,
+    optional, vae, audio_vae, image, audio; its one output is the conditioning with the guide added. The given audio is the guide (no image: the picture is the reference node's). The
+    sampler keeps the reference node's latent and the guider takes the new conditioning, so the audio of the video is still decoded from the sampled latent (node 14, untouched)."""
+    g["21"] = {"class_type": LOCK_NODES["addguide"], "inputs": {"positive": ["7", 0], "latent": ["7", 1], "frame_idx": 0,
+                                                              "vae": ["3", 0], "audio_vae": ["4", 0], "audio": ["6", 0]}}
+    g["11"]["inputs"]["conditioning"] = ["21", 0]
+
+
+def lock_audiodrive(g: dict) -> None:
+    """The third-party node VRGDG_MiniMaxH3AudioDrive, referred to by name in a graph (behind the capability check and the operator's switch; nothing of its code is here). Wiring as the operator measured it on a 4090: the node takes the reference node's audio-video latent, the same audio and the audio VAE; its first output is the latent the sampler
+    starts from and its second is the audio of the video, so the audio is not decoded from the sampled latent (node 14 is gone)."""
+    g["21"] = {"class_type": LOCK_NODES["audiodrive"], "inputs": {"av_latent": ["7", 1], "source_audio": ["6", 0], "audio_vae": ["4", 0]}}
+    g["12"]["inputs"]["latent_image"] = ["21", 0]
+    del g["14"]
+    g["15"]["inputs"]["audio"] = ["21", 1]
+
+
+def lock_custom(g: dict) -> None:
+    """EXTENSION POINT, not implemented: a future lock built only of official nodes (for example VAEEncodeAudio and SetLatentNoiseMask) replaces this body and is then also given an entry
+    in LOCK_NODES / LOCK_INPUTS (the nodes it needs, so /health and the missing-node error name them) and cleared in plan(). Until then `lock: custom` is refused at the door and, should a graph
+    ever be asked for, here: it must not build the unlocked graph."""
+    raise LockUnavailable(CUSTOM_WORDS)
+
+
+LOCK_BUILDERS = {"addguide": lock_addguide, "audiodrive": lock_audiodrive, "custom": lock_custom}
 
 
 # ---- inputs ----------------------------------------------------------------------------------------------------------
@@ -338,6 +410,7 @@ def plan(workflow: str, body: dict) -> dict:
     kind = WORKFLOWS.get(workflow)
     if kind is None:
         raise Refused(f"unknown workflow {workflow!r}; this box serves {', '.join(sorted(WORKFLOWS))}")
+    lock = plan_lock(workflow, body)          # first: a lock sent to a workflow that does not anchor the audio is refused whatever else is in the body
     if kind == "tts":
         return plan_voice(body)
     res = body.get("resolution", "768p竖")
@@ -373,7 +446,25 @@ def plan(workflow: str, body: dict) -> dict:
     p = {"kind": kind, "w": w, "h": h, "seconds": secs, "seed": seed, "prompt": str(prompt)}
     if kind == "ref" and extra:
         p["extra_images"] = len(extra)
+    if lock is not None:
+        p["lock"] = lock
     return p
+
+
+def plan_lock(workflow: str, body: dict) -> str | None:
+    """The `lock` of a take (no side effects): None for every workflow but the audio-locked one, which defaults to "addguide". A coded Refused (`lock_...: words`) for a lock that is not
+    one of LOCKS, for "custom" (reserved, not implemented), and for a `lock` sent to a workflow that does not lock: the caller asked for an anchored audio and would otherwise get an unanchored one."""
+    lock = body.get("lock")
+    if workflow != LOCKED_WORKFLOW:
+        if lock is not None:
+            raise Refused(f"lock_wrong_workflow: lock belongs to {LOCKED_WORKFLOW}; {workflow} does not anchor the audio, so the take was not queued")
+        return None
+    lock = DEFAULT_LOCK if lock is None else lock
+    if not isinstance(lock, str) or lock not in LOCKS:
+        raise Refused(f"lock_unknown: lock {lock!r} is not served; use one of {', '.join(LOCKS)}")
+    if lock == "custom":
+        raise Refused(CUSTOM_WORDS)
+    return lock
 
 
 def _unit(v, what: str) -> float:
@@ -469,11 +560,113 @@ class Line:
             return [{"state": t["state"], "label": t["label"], "age_s": int(now - t["since"])} for t in self.tickets]
 
 
+# ---- the lock nodes: what ComfyUI has, where it comes from, whether a lock may be used ----------------------------------
+
+def node_inputs(info) -> set:
+    """The input names of a node as ComfyUI's /object_info/<node> describes it (required and optional); empty for anything that is not such a description."""
+    out: set = set()
+    inp = info.get("input") if isinstance(info, dict) else None
+    if isinstance(inp, dict):
+        for section in ("required", "optional"):
+            names = inp.get(section)
+            if isinstance(names, dict):
+                out |= {k for k in names if isinstance(k, str)}
+    return out
+
+
+def pack_of(module) -> str | None:
+    """The custom-node folder a node comes from, from the `python_module` ComfyUI reports ("custom_nodes.<folder>"); None for a core node or anything odd (the name is used as a folder name)."""
+    if not isinstance(module, str) or not module.startswith("custom_nodes."):
+        return None
+    name = module[len("custom_nodes."):]
+    return name if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.\-]{0,99}", name) and ".." not in name else None
+
+
+def git_head(folder: Path) -> str | None:
+    """The commit a folder's git checkout is on (40 hex), read from .git/HEAD and its ref or packed-refs without running git; None when it is not a checkout or cannot be read."""
+    git = folder / ".git"
+    try:
+        head = (git / "HEAD").read_text().strip()
+        if re.fullmatch(r"[0-9a-f]{40}", head):
+            return head
+        if not head.startswith("ref: "):
+            return None
+        ref = head[5:].strip()
+        if ".." in ref or ref.startswith("/"):
+            return None
+        try:
+            val = (git / ref).read_text().strip()
+        except OSError:
+            val = next((ln.split()[0] for ln in (git / "packed-refs").read_text().splitlines() if ln.endswith(" " + ref)), "")
+        return val if re.fullmatch(r"[0-9a-f]{40}", val) else None
+    except (OSError, ValueError, IndexError):          # ValueError: an undecodable file or a NUL in a path
+        return None
+
+
+def pack_version(folder: Path) -> str | None:
+    """The version line of a pack's pyproject.toml (`version = "x"`), None when there is none; for a pack installed without git."""
+    try:
+        with open(folder / "pyproject.toml", encoding="utf-8", errors="replace") as f:
+            m = re.search(r'^version\s*=\s*"([^"\n]{1,40})"', f.read(8192), re.M)
+    except OSError:
+        return None
+    return m.group(1) if m else None
+
+
+def lock_words(lock: str, why: str, **kw) -> str:
+    """The coded words of a lock that cannot be served. `why`: allowed, missing, incompatible (missing=[inputs]) or unknown."""
+    node = LOCK_NODES[lock]
+    if why == "allowed":
+        return (f"lock_not_allowed: lock=audiodrive uses the third-party node {node} (pack comfyui-vrgamedevgirl) under the {VRGDG_LICENCE}, which is not an open licence: "
+                f"serving it to others through an API or a hosted workflow needs the author's paid commercial licence. It is off on this box until the owner decides and the operator "
+                f"sets {ENV_ALLOW_VRGDG}=1 for the adapter. Use lock=addguide (the official node). Nothing was queued.")
+    if why == "missing":
+        where = ("it is a ComfyUI core node (comfy_extras.nodes_minimax_h3): update ComfyUI" if lock == "addguide"
+                 else "it comes from the third-party custom-node pack comfyui-vrgamedevgirl: install it on the box image, pinned to a commit (docs/cloud-gpu.md)")
+        return f"lock_node_missing: lock={lock} needs the node {node}, which this box's ComfyUI does not have ({where}). The take was not run and no other graph was used instead."
+    if why == "incompatible":
+        return (f"lock_node_incompatible: the node {node} in this box's ComfyUI has no input {', '.join(kw['missing'])} that the adapter wires (its definition changed?). "
+                f"The take was not run and no other graph was used instead.")
+    return (f"lock_state_unknown: lock={lock} needs the node {node}, but ComfyUI's node list could not be read (ComfyUI down or still starting). "
+            f"The take was not run and no other graph was used instead.")
+
+
+def lock_entry(lock: str, info, checked: bool, allowed: bool, root: Path) -> dict:
+    """What /health says of one lock and whether it may be used: `info` is the node's /object_info description (None: ComfyUI does not have it), `checked` False when ComfyUI did not answer
+    (then nothing is known), `allowed` the operator's switch (it matters for audiodrive only). `problem` is the coded words a take of this lock gets, None when it can run: the licence
+    switch is looked at first, then the node, then its inputs."""
+    node = LOCK_NODES[lock]
+    module = info.get("python_module") if isinstance(info, dict) and isinstance(info.get("python_module"), str) else None
+    e: dict = {"node": node, "present": (info is not None) if checked else None}
+    problem = None
+    if lock == "audiodrive" and not allowed:
+        problem = lock_words(lock, "allowed")
+    elif not checked:
+        problem = lock_words(lock, "unknown")
+    elif info is None:
+        problem = lock_words(lock, "missing")
+    else:
+        lacking = [n for n in LOCK_INPUTS[lock] if n not in node_inputs(info)]
+        if lacking:
+            problem = lock_words(lock, "incompatible", missing=lacking)
+    if lock == "addguide":
+        e["module"] = module[:100] if module else None
+    else:
+        pack = pack_of(module)
+        folder = root / "custom_nodes" / pack if pack else None
+        e.update(allowed=allowed, licence=VRGDG_LICENCE, pack=pack, commit=git_head(folder) if folder else None, version=pack_version(folder) if folder else None)
+        on = "enabled" if allowed else f"off: {ENV_ALLOW_VRGDG} is not set"
+        e["status"] = f"audiodrive ({VRGDG_TAG}, {on})"
+    e["usable"] = problem is None
+    e["problem"] = problem
+    return e
+
+
 # ---- the server ------------------------------------------------------------------------------------------------------
 
 class Host:
     def __init__(self, token: str, comfy: str, state: Path, comfy_root: Path, public_base: str = "", bind: str = "127.0.0.1", tts: dict | None = None,
-                 free_after_take: bool = FREE_AFTER_TAKE):
+                 free_after_take: bool = FREE_AFTER_TAKE, allow_vrgdg: bool = False):
         if not token:
             raise ValueError("the token is empty: the adapter would answer anyone")
         self.token, self.comfy, self.state, self.root = token, comfy.rstrip("/"), state, comfy_root
@@ -495,6 +688,9 @@ class Host:
         self._card, self._card_lock, self._last_maintain = ("unknown", 0.0), threading.Lock(), 0.0
         self._mem_mib = None
         self._vram_free = None              # ComfyUI's own count of the first device's free memory (MiB), from the /system_stats that comfy_up asks for
+        self.allow_vrgdg = bool(allow_vrgdg)   # the operator's switch for the third-party lock (CLOUDGPU_ALLOW_NODE_VRGDG=1); off unless a person set it
+        self._locks_lock = threading.Lock()
+        self._lock_caps: tuple = (0.0, None)   # (when ComfyUI's lock nodes were last read, what they said)
         self.proof_ok = loopback_bind(bind)     # on any other bind /health never answers `proof`
         self._proofs: list = []                 # when the last answers with a proof were made (the last minute)
         self.orphans = self.restarted()
@@ -646,6 +842,10 @@ class Host:
         p = plan(workflow, body)
         if p["kind"] == "tts" and not self.tts:
             raise Refused("this box has no voice installed (IndexTTS2: start the adapter with --tts-python and --tts-dir, see docs/cloud-gpu.md)")
+        if p.get("lock"):
+            why = self.lock_problem(p["lock"], door=True)        # before anything is fetched or queued
+            if why:
+                raise Refused(why)
         with self.lock:
             self.n_active += 1              # busy from here: fetching the inputs below can take a minute, and a power-off must not fall into it
         tid = "h3-" + uuid.uuid4().hex[:20]
@@ -733,8 +933,13 @@ class Host:
         alive = wt is not None and wt.is_alive()
         card = self.card()
         up = self.comfy_up()
+        caps = self.lock_caps() if up else self.unknown_locks()          # no ComfyUI, no knowledge: no lock is offered
+        locks = caps["locks"]
+        if not self.proof_ok:                  # a widened bind answers anyone: which build of third-party code runs here is not told (loopback, the tunnel, is)
+            locks = {k: {**e, "commit": None, "version": None} if "commit" in e else e for k, e in locks.items()}
         d = {"ok": alive, "comfy": up, "busy": self.busy(), "worker": "alive" if alive else "dead", "card": card,
-             "memory_mib": self._mem_mib if card != "unknown" else None, "vram_free_mib": self._vram_free if up else None, "voice": bool(self.tts), "files": 1, "t2v": True}
+             "memory_mib": self._mem_mib if card != "unknown" else None, "vram_free_mib": self._vram_free if up else None, "voice": bool(self.tts), "files": 1, "t2v": True,
+             "audio_lock": [k for k, e in locks.items() if e["usable"]], "audio_lock_detail": {"checked": caps["checked"], **locks}}
         if nonce and self.proof_ok and NONCE.fullmatch(nonce) and self._proof_allowed():
             d["proof"] = hmac.new(self.token.encode(), nonce.encode(), "sha256").hexdigest()
         return d
@@ -747,6 +952,43 @@ class Host:
                 return False
             self._proofs.append(now)
             return True
+
+    # ---- the locks (0.20.0) ----
+    def unknown_locks(self) -> dict:
+        """What is known of the lock nodes when ComfyUI has not answered: nothing (`checked` false); audiodrive is still off without the operator's switch."""
+        return {"checked": False, "locks": {k: lock_entry(k, None, False, self.allow_vrgdg, self.root) for k in LOCK_NODES}}
+
+    def lock_caps(self, fresh: bool = False) -> dict:
+        """ComfyUI's lock nodes as {"checked": bool, "locks": {lock: lock_entry}}, read from its /object_info (one node at a time: the whole list is megabytes). Kept LOCK_CACHE_S, or COMFY_CACHE_S
+        when ComfyUI did not answer; `fresh` asks again. Never raises."""
+        with self._locks_lock:
+            when, caps = self._lock_caps
+            if not fresh and caps is not None and time.time() - when < (LOCK_CACHE_S if caps["checked"] else COMFY_CACHE_S):
+                return caps
+            infos = {}
+            try:
+                for lock, node in LOCK_NODES.items():
+                    doc = self.comfy_json("/object_info/" + urllib.parse.quote(node), timeout=5)
+                    info = doc.get(node) if isinstance(doc, dict) else None
+                    infos[lock] = info if isinstance(info, dict) else None
+                caps = {"checked": True, "locks": {k: lock_entry(k, infos[k], True, self.allow_vrgdg, self.root) for k in LOCK_NODES}}
+            except Exception:                         # ComfyUI silent or an answer that is not a node description: nothing is known, nothing is offered (never an error to /health)
+                caps = self.unknown_locks()
+            self._lock_caps = (time.time(), caps)
+            return caps
+
+    def lock_problem(self, lock: str, door: bool) -> str | None:
+        """The coded words saying why a take of `lock` cannot be served now, None when it can. ComfyUI's node list is read afresh every time (two small calls per take, never the cache: a node
+        that vanished with a ComfyUI restart must stop the take in words, and one that appeared must not be refused as missing). `door`: the take is only being accepted; a ComfyUI that did not
+        answer is then not a refusal (a cold box is still starting: the take waits for it and run() asks again), but once the take runs the same silence fails it. Never a fallback to another graph."""
+        if lock not in LOCK_NODES:
+            return CUSTOM_WORDS if lock == "custom" else f"lock_unknown: lock {lock!r} is not one of {', '.join(LOCKS)}"
+        if lock == "audiodrive" and not self.allow_vrgdg:
+            return lock_words(lock, "allowed")        # the licence switch is looked at before ComfyUI is asked anything, and it does not change while the adapter runs
+        caps = self.lock_caps(fresh=True)
+        if door and not caps["checked"]:
+            return None
+        return caps["locks"][lock]["problem"]
 
     # ---- worker ----
     def comfy_json(self, path: str, body=None, timeout=60):
@@ -852,9 +1094,14 @@ class Host:
                 raise RuntimeError("ComfyUI is not answering")
             time.sleep(3)
         p, files = t["plan"], t["inputs"]
+        lock = p.get("lock")
+        if lock:                                             # ComfyUI is up now: ask for its nodes again, and stop the take in words rather than run another graph
+            why = self.lock_problem(lock, door=False)
+            if why:
+                raise LockUnavailable(why)
         prefix = f"cloudgpu/{t['id']}"
         g = graph(p["kind"], w=p["w"], h=p["h"], seconds=p["seconds"], image=files[0] if files else None, audio=files[1] if p["kind"] == "ref" else None,
-                  prompt=p["prompt"], seed=p["seed"], prefix=prefix, extra_images=files[2:] if p["kind"] == "ref" else ())
+                  prompt=p["prompt"], seed=p["seed"], prefix=prefix, extra_images=files[2:] if p["kind"] == "ref" else (), lock=lock)
         if p["kind"] == "fl" and files[1] != files[0]:
             g["5b"]["inputs"]["image"] = files[1]
         try:
@@ -1167,7 +1414,11 @@ def main():
         raise SystemExit("set CLOUDGPU_TOKEN to a secret of at least 24 characters")
     worker = Path(__file__).resolve().with_name("tts_worker.py")
     tts = {"python": a.tts_python, "dir": a.tts_dir, "worker": worker} if a.tts_python and a.tts_dir and worker.is_file() and (Path(a.tts_dir) / "config.yaml").is_file() else None
-    host = Host(token, a.comfy, Path(a.state), Path(a.comfy_root), a.public_base, a.bind, tts, bool(a.free_after_take))
+    allow_vrgdg = os.environ.get(ENV_ALLOW_VRGDG, "").strip().lower() in ("1", "true", "yes", "on")
+    host = Host(token, a.comfy, Path(a.state), Path(a.comfy_root), a.public_base, a.bind, tts, bool(a.free_after_take), allow_vrgdg)
+    if allow_vrgdg:
+        print(f"audio lock: audiodrive is ENABLED by {ENV_ALLOW_VRGDG} ({VRGDG_TAG}: {VRGDG_LICENCE}); the operator has taken the decision", file=sys.stderr, flush=True)
+    host.lock_caps(fresh=True)                      # the lock nodes are read at start; ComfyUI may still be starting, then /health and the first take read them again
     host.start_worker()
     ThreadingHTTPServer((a.bind, a.port), handler(host)).serve_forever()
 

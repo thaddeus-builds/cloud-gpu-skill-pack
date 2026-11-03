@@ -37,7 +37,8 @@ def status(env: Mapping | None = None, envfile: str | None = None) -> dict:
                 nxt.append(e.message)
     out["box"] = {"answers": health is not None, "comfy": bool(health and health.get("comfy")), "busy": (health or {}).get("busy"),
                   "worker": (health or {}).get("worker"), "card": (health or {}).get("card"),
-                  "voice": (health or {}).get("voice")}           # True | False | None (an adapter older than 0.6.0 does not say)
+                  "voice": (health or {}).get("voice"),           # True | False | None (an adapter older than 0.6.0 does not say)
+                  "audio_lock": (health or {}).get("audio_lock")}  # the `lock` values minimax_h3_image_audio_locked serves now (["addguide"]; [] none); None: an adapter older than 0.20.0
     card, name = out["box"]["card"], box.get("BOX")
     if card and card != "unknown" and name and _norm(name) not in _norm(card):
         nxt.append(f"the box says its card is {card!r} but CLOUDGPU_BOX is {name!r}: prices are per box, check which one this is")

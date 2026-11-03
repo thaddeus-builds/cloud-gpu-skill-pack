@@ -6,7 +6,7 @@ nanoseconds, so names sort in arrival order. A ticket whose lock can be taken is
 
 A take may claim a box when nothing else is running on it and no older live ticket that may use the same box is still waiting. A take pinned to one box (a result to fetch) is eligible
 for that box only. This orders the takes of ONE machine; callers on different machines keep their line on the box itself (line.py, the adapter's /cloudgpu/line). Without flock (Windows) or a state directory that
-cannot be written there is no queue and a take goes as before: the in-process lock still holds. `python3 -m cloudgpu status` shows who runs and who waits."""
+cannot be written there is no queue and a take goes as before: the in-process lock still holds. `openmax-cloudgpu status` shows who runs and who waits."""
 
 from __future__ import annotations
 

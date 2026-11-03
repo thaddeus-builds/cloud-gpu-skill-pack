@@ -23,8 +23,8 @@
 
 ## Being told
 
-The line appears wherever someone looks: `python3 -m cloudgpu status`, `instances list`, `instances ensure`, and a consumer's own health check. To be told without looking, run
-`python3 -m cloudgpu instances expiry` from a cron (exit 0 well, 1 a pass ends soon, 2 a pass has ended) and send the output to the account holder when it is not 0. How many days ahead is
+The line appears wherever someone looks: `openmax-cloudgpu status`, `instances list`, `instances ensure`, and a consumer's own health check. To be told without looking, run
+`openmax-cloudgpu instances expiry` from a cron (exit 0 well, 1 a pass ends soon, 2 a pass has ended) and send the output to the account holder when it is not 0. How many days ahead is
 `CLOUDGPU_PASS_WARN_DAYS` (default 3: long enough for a person to be reached over a weekend, short enough not to nag a week ahead).
 
 ## What a day with no free card taught (2026-11-03)

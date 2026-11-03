@@ -1,4 +1,4 @@
-"""`python3 -m cloudgpu instances stock`, offline: the free cards of the autodl market page per data center (one request each, no token), the filter by spec, the exit code
+"""`openmax-cloudgpu instances stock`, offline: the free cards of the autodl market page per data center (one request each, no token), the filter by spec, the exit code
 that gates a power-on (0 a card is free, 3 none is), and the two refusals autodl alternates between when no card is free both counting as no stock."""
 
 import io

@@ -1,5 +1,5 @@
 #!/bin/sh
-# Run ON the GPU box (any vendor), from the folder `python3 -m cloudgpu bundle` made (copied there with scp and unpacked). Installs the adapter and starts it.
+# Run ON the GPU box (any vendor), from the folder `openmax-cloudgpu bundle` made (copied there with scp and unpacked). Installs the adapter and starts it.
 #   sh install.sh MODELS PORT < token-file        MODELS: auto (detect_models.py reads this image's files), or a json (models.4090.json)
 #   sh install.sh auto 6009 < token
 # The token (24+ characters) is read from stdin and written 0600; it is never an argument, so `ps` does not show it.

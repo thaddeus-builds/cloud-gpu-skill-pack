@@ -32,7 +32,7 @@ calls a client of that API already makes, so a client needs a base URL and a tok
                                                                 orders the callers that use it; a caller that submits without a ticket still queues in the worker as before. While a ticket is live
                                                                 the box counts as busy in /health, so it is not powered off or restarted under a caller that waits.)
 
-    GET  /cloudgpu/tasks[?since=EPOCH]  -> {"data":{"tasks":[{"workflow","status","created","started","done"}],"now":EPOCH,"ttl_s":86400}}   what `python3 -m cloudgpu util` reads (0.12.0)
+    GET  /cloudgpu/tasks[?since=EPOCH]  -> {"data":{"tasks":[{"workflow","status","created","started","done"}],"now":EPOCH,"ttl_s":86400}}   what `openmax-cloudgpu util` reads (0.12.0)
                                                                 (token-checked, read only. The task records of the last TASK_TTL_S, newest last; `done` is when the take finished (the file's
                                                                 modification time for one the adapter failed itself), null while it waits or runs; no task id and nothing a take carried.)
 

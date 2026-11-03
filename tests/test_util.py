@@ -1,5 +1,5 @@
 """cloudgpu.util: the utilisation report. The statistics are a pure function of task records (made-up ones here, numbers worked out by hand); the adapter lists its records
-(`/cloudgpu/tasks`, token-checked, no ids) and `python3 -m cloudgpu util` reads them through the real client. Read only throughout."""
+(`/cloudgpu/tasks`, token-checked, no ids) and `openmax-cloudgpu util` reads them through the real client. Read only throughout."""
 
 import io
 import json

@@ -62,7 +62,7 @@ class Box:
             raise CloudGpuError("key_missing", "CLOUDGPU_TOKEN has a character that cannot be sent in an HTTP header (a newline inside it?)")
         if not self.reprove():
             raise CloudGpuError("down", "nothing answers at the box's local address any more (the tunnel is down?): the token was not sent",
-                                ["run ensure_up() again, or python3 -m cloudgpu status"])
+                                ["run ensure_up() again, or openmax-cloudgpu status"])
         return t
 
     def _needs_proof(self) -> bool:

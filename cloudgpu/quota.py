@@ -3,8 +3,8 @@
 The allowance is one small JSON file in the state directory (`CLOUDGPU_QUOTA_FILE`, else `<state dir>/quota.json`; the state directory is `CLOUDGPU_STATE_DIR`, else `~/.cloudgpu`).
 **No file, or a zero in it, means the agent may not create anything**: that is the default, and the only way the package ever lets an agent start billing is a person writing numbers here:
 
-    python3 -m cloudgpu quota set --by NAME --max-instances 2 --max-cny-per-day 100 --price v-48g=3.2 [--note ...]
-    python3 -m cloudgpu quota show
+    openmax-cloudgpu quota set --by NAME --max-instances 2 --max-cny-per-day 100 --price v-48g=3.2 [--note ...]
+    openmax-cloudgpu quota show
 
 `--by` is recorded with the time (in the file and in the ledger). A quota file that group or others can write is not believed (it is the agent's own account to change, then): the allowance is 0
 until `chmod go-w` is done. Keep the file out of the agent's reach (another user's file, mode 0644, or read only) for the allowance to be a limit and not a habit; see docs, "An allowance for an agent".
@@ -181,6 +181,46 @@ def spent_today(rows: list[dict], now: float) -> float:
         elif a in ("release", "gone") and i in open_:
             total += close(open_.pop(i), float(r.get("ts") or now))
     return total + sum(close(r, now) for r in open_.values())
+
+
+RUN_START = ("create", "power-on")                  # ledger actions after which an instance bills by the hour
+RUN_END = ("power-off", "release", "gone")
+
+
+def run_spend_today(rows: list[dict], now: float) -> float:
+    """CNY the ledger shows run since local midnight, instance by instance (the budget gate's number, `--budget-cny`): a run starts at a `create` or `power-on` line and ends at the next
+    `power-off`, `release` or `gone` line of that instance, at its recorded price per hour. A run with no end yet counts until `now`, except one with a `deadline` line (the guard's hard stop)
+    and no `guard-failed` line after it: that run counts until its deadline, passed or not (the hours it is going to run are set aside before they pass, so the next power-on in the same
+    minute sees them). A box turned off by something that writes no ledger line (the vendor's console) therefore counts until its deadline, or until now when it has none: an upper bound. A line with no price counts at the last price the ledger knew for that instance."""
+    start, total = day_start(now), 0.0
+    open_: dict[str, dict] = {}
+    price_of: dict[str, float] = {}
+
+    def money(run: dict, end: float) -> float:
+        t0 = max(run["ts"], start)
+        return run["price"] * (end - t0) / 3600 if end > t0 else 0.0
+
+    for r in rows:
+        a, i, ts = r.get("action"), r.get("instance"), float(r.get("ts") or 0)
+        if not i:
+            continue
+        if r.get("price_cny_per_hour"):
+            price_of[i] = float(r["price_cny_per_hour"])
+        if a in RUN_START:
+            if i in open_:
+                total += money(open_.pop(i), ts)
+            open_[i] = {"ts": ts, "price": price_of.get(i, 0.0), "until": None, "failed": False}
+        elif a == "deadline" and i in open_:
+            open_[i]["until"] = float(r.get("until") or 0) or None
+            open_[i]["failed"] = False
+        elif a == "guard-failed" and i in open_:
+            open_[i]["failed"] = True
+        elif a in RUN_END and i in open_:
+            total += money(open_.pop(i), ts)
+    for run in open_.values():
+        end = now if run["failed"] or run["until"] is None else run["until"]
+        total += money(run, end)
+    return total
 
 
 def parse_price(items: list[str]) -> dict:

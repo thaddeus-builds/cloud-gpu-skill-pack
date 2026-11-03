@@ -34,10 +34,18 @@ def _service(h: dict | None, name: str) -> tuple[str, str]:
         return "up", ""
     svc = h.get("services")
     e = svc.get(name) if isinstance(svc, dict) else None
-    if isinstance(e, dict) and e.get("state") in ("up", "starting", "down", "absent"):
+    if isinstance(e, dict):
         r = e.get("reason")
-        return e["state"], r if isinstance(r, str) else ""
+        st = e.get("state")
+        return (st if st in ("up", "starting", "down", "absent") else "unknown"), (str(r)[:300] if r else "")
     return "unknown", ""
+
+
+def _check_need(need) -> tuple:
+    """`need` is a tuple or list of the service names the adapter reports, at least one; anything else is the caller's bug."""
+    if isinstance(need, str) or not isinstance(need, (tuple, list)) or not need or any(n not in ("comfy", "voxcpm") for n in need):
+        raise ValueError('ensure_up(need=...) takes a non-empty tuple of "comfy" and/or "voxcpm"')
+    return tuple(need)
 
 
 def _not_up(h: dict | None, need) -> list[tuple[str, str, str]]:
@@ -60,6 +68,7 @@ class Box:
         self.env = os.environ if env is None else env
         self._spawn, self._sleep = spawn, sleep
         self._up, self._ready, self._power = threading.Lock(), False, None
+        self._ready_for: set = set()                  # the services the last successful ensure_up saw up: a call that needs more is not answered from `_ready`
         self._proved, self._powered, self._hooked = None, False, False      # when the last proof passed (monotonic); this process sent the power-on; the exit hook is registered
 
     def get(self, name: str) -> str | None:
@@ -177,13 +186,15 @@ class Box:
         A box whose adapter answers and says a needed service is `starting` (0.22.0: ComfyUI takes 2 to 3 minutes after a boot) is waited for, up to UP_TIMEOUT_S, polling every 10 s,
         with no power call (it is on); with `CLOUDGPU_POWER=none` a needed service that is `down` or `absent` is refused at once with the adapter's own reason."""
         with self._up:
-            if self._ready and self.reprove():
+            need = _check_need(need)
+            if self._ready and set(need) <= self._ready_for and self.reprove():
                 return
             self.tunnel()
             h = self.health()
             wait = _not_up(h, need)
             if wait:
                 pw = self.power
+                self._refuse_if_unreported(h, wait)
                 if pw.name == "none":
                     self._refuse_if_stopped(h, wait)                 # the adapter says why a service will not come: nothing here can start it
                 if _only_starting(h, wait):
@@ -203,9 +214,22 @@ class Box:
                     self.tunnel()                            # the door may have moved while it booted
                     h = self.health()
                     wait = _not_up(h, need)
+                    if wait:
+                        self._refuse_if_unreported(h, wait)
                     if wait and pw.name == "none":
                         self._refuse_if_stopped(h, wait)     # it was starting and stopped: no reason to wait out the rest
+            self._ready_for = (self._ready_for if self._ready else set()) | set(need)
             self._ready = True
+
+    def _refuse_if_unreported(self, h: dict | None, wait: list) -> None:
+        """A needed service other than ComfyUI that the answering adapter cannot tell (an adapter older than 0.22.0 has no `services`, or it could not read its record): neither a wait
+        nor a power-on can change that, so it is said at once. (ComfyUI has its own `comfy` key, which every adapter has.)"""
+        if not isinstance(h, dict) or h.get("ok") is False:
+            return
+        for n, st, r in wait:
+            if st == "unknown" and n != "comfy":
+                raise CloudGpuError("down", f"the box answers, but its adapter does not say whether {n} is up" + (f": {r}" if r else " (an adapter older than 0.22.0 does not report it)"),
+                                    ["python3 -m cloudgpu status", "update the adapter on the box (docs, 'Set up a box')"], detail=n)
 
     def _refuse_if_stopped(self, h: dict | None, wait: list) -> None:
         """With no power backend: the adapter answers and a needed service is down or absent with a reason, which is what a person must read; nothing here can start it."""

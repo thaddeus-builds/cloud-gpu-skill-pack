@@ -310,6 +310,35 @@ def test_ensure_up_waits_for_voxcpm_only_when_the_caller_needs_it():
         a.srv.shutdown()
 
 
+def test_what_ensure_up_proved_is_remembered_per_service_and_a_bad_need_or_an_unreporting_adapter_is_said_at_once():
+    vox = {**_comfy("up", "answers"), "voxcpm": {"state": "absent", "reason": "VoxCPM is not installed here"}}
+    a = FakeAdapter(comfy=True, services=vox)
+    old = FakeAdapter(comfy=True)                                  # an adapter older than 0.22.0: ComfyUI answers, nothing else is reported
+    try:
+        b = box({"CLOUDGPU_BASE": a.base, "CLOUDGPU_POWER": "none"})
+        b.ensure_up()
+        with _t.raises("down") as c:                               # the box is ready for ComfyUI, not for what was not asked: no answer from the cache
+            b.ensure_up(need=("comfy", "voxcpm"))
+        assert "voxcpm is absent" in c.err.message
+        b.ensure_up()                                              # and ComfyUI alone is still ready
+        for bad in ("comfy", (), ("comfy", "tts"), None):
+            try:
+                b.ensure_up(need=bad)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError(f"need={bad!r} was accepted")
+        for backend in ({"CLOUDGPU_POWER": "none"}, {"CLOUDGPU_INSTANCE": "pro-1", "AUTODL_DEV_TOKEN": "dev"}):
+            with autodl_api(lambda m, path, bd, q: "shutdown") as calls:
+                with _t.raises("down") as c:
+                    box({"CLOUDGPU_BASE": old.base, **backend}).ensure_up(need=("comfy", "voxcpm"))
+                assert "does not say whether voxcpm is up" in c.err.message and not any(x[1] == "power_on" for x in calls), (c.err.message, calls)
+        box({"CLOUDGPU_BASE": old.base, "CLOUDGPU_POWER": "none"}).ensure_up()
+    finally:
+        a.srv.shutdown()
+        old.srv.shutdown()
+
+
 def test_a_box_with_a_backend_whose_adapter_says_starting_is_waited_for_without_a_power_on_call():
     a = FakeAdapter(comfy=False, services=_comfy("starting", "started 40 s ago"))
     n = []

@@ -1,6 +1,6 @@
 """Where a box stands, read only: the settings (names, set or unset), the box's /health, the power backend's account view. Sends no take, powers
 nothing on or off, writes nothing, costs nothing, lists the active holds, prints no value of a setting. `ready` is true when a take could go to the box now; `next` says
-what a person must do otherwise, one line each. `line` is the box's own line of callers (who runs and who waits, any machine); `queue` is this machine's. A consumer adds its own checks (prices, a project's switch) to `next`."""
+what a person must do otherwise, one line each. `services` says per process the box needs (adapter, comfy, voxcpm) {state: up | starting | down | absent | unknown, reason}: the adapter's view of the box's own processes (0.22.0). `line` is the box's own line of callers (who runs and who waits, any machine); `queue` is this machine's. A consumer adds its own checks (prices, a project's switch) to `next`."""
 
 from __future__ import annotations
 
@@ -15,6 +15,33 @@ from .power import PASS_BILLING
 
 def _norm(text: str) -> str:
     return "".join(c for c in text.lower() if c.isalnum())
+
+
+def services_view(health: dict | None, reach_ok: bool, impostor: bool) -> dict:
+    """{adapter, comfy, voxcpm: {state, reason}}: state is up | starting | down | absent | unknown. The box's /health says comfy and voxcpm (0.22.0); an older adapter says only
+    whether comfy answers; with no adapter answering, the other two are not known."""
+    if health is None:
+        if not reach_ok:
+            why = "no CLOUDGPU_TOKEN and CLOUDGPU_BASE (or CLOUDGPU_SSH_KEY) to ask with"
+            return {n: {"state": "unknown", "reason": why} for n in ("adapter", "comfy", "voxcpm")}
+        a = ("something else answers at the box's local address and does not prove it is the adapter" if impostor
+             else "does not answer: a tunnel that is down, or the box is off or its pass has ended")
+        return {"adapter": {"state": "down", "reason": a},
+                "comfy": {"state": "unknown", "reason": "the adapter does not answer, so the box cannot be asked"},
+                "voxcpm": {"state": "unknown", "reason": "the adapter does not answer, so the box cannot be asked"}}
+    out = {"adapter": {"state": "up" if health.get("ok") is not False else "down",
+                       "reason": "answers /health" if health.get("ok") is not False else "answers but its worker is dead: no take will run"}}
+    svc = health.get("services") if isinstance(health.get("services"), dict) else {}
+    for n in ("comfy", "voxcpm"):
+        e = svc.get(n)
+        if isinstance(e, dict) and e.get("state") in ("up", "starting", "down", "absent", "unknown"):
+            out[n] = {k: e[k] for k in ("state", "reason", "port", "log", "loaded", "last_line") if k in e}
+        elif n == "comfy":
+            out[n] = {"state": "up" if health.get("comfy") else "down",
+                      "reason": "answers" if health.get("comfy") else "does not answer (an adapter older than 0.22.0 does not say why)"}
+        else:
+            out[n] = {"state": "unknown", "reason": "an adapter older than 0.22.0 does not report it"}
+    return out
 
 
 def status(env: Mapping | None = None, envfile: str | None = None) -> dict:
@@ -52,7 +79,17 @@ def status(env: Mapping | None = None, envfile: str | None = None) -> dict:
         nxt.append("the box does not answer: a tunnel that is down, or the box is off or its pass has ended"
                    + ("; the box opens the tunnel by key" if box.get("SSH_KEY") else "; set CLOUDGPU_SSH_KEY to let it open the tunnel"))
     elif not health.get("comfy"):
-        nxt.append("the adapter answers but ComfyUI does not yet: wait a minute after a power-on, then run this again")
+        c = (health.get("services") or {}).get("comfy") if isinstance(health.get("services"), dict) else None
+        if isinstance(c, dict) and c.get("state") == "starting":
+            nxt.append(f"ComfyUI is starting on the box ({c.get('reason')}): it takes 2 to 3 minutes after a power-on; run this again then")
+        elif isinstance(c, dict) and c.get("state") in ("down", "absent"):
+            nxt.append(f"ComfyUI is {c['state']} on the box: {c.get('reason')}. start.sh on the box starts it (it starts only what is down); its log is {c.get('log') or 'logs/comfyui.log'} in the adapter's folder")
+        else:
+            nxt.append("the adapter answers but ComfyUI does not yet: wait a minute after a power-on, then run this again (an adapter older than 0.22.0 does not say why)")
+    vox = (health.get("services") or {}).get("voxcpm") if health and isinstance(health.get("services"), dict) else None
+    if isinstance(vox, dict) and vox.get("state") in ("down", "starting"):
+        nxt.append(f"VoxCPM (the voice service) is {vox['state']} on the box: {vox.get('reason')}; a Make with a VoxCPM voice needs it, an H3 take does not")
+    out["services"] = services_view(health, reach_ok, impostor)
     pw = None
     try:
         pw = box.power

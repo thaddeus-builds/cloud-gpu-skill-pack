@@ -160,7 +160,9 @@ class Box:
                 end = time.time() + UP_TIMEOUT_S
                 while not (h and h.get("comfy")):
                     if time.time() > end:
-                        raise CloudGpuError("timeout", f"the box did not come up in {UP_TIMEOUT_S}s" + ("" if pw.configured() else "; " + NO_ACCOUNT_HINT),
+                        c = ((h or {}).get("services") or {}).get("comfy") if isinstance((h or {}).get("services"), dict) else None
+                        why = f"; the adapter answers and says ComfyUI is {c.get('state')}: {c.get('reason')}" if isinstance(c, dict) and c.get("reason") else ""
+                        raise CloudGpuError("timeout", f"the box did not come up in {UP_TIMEOUT_S}s" + why + ("" if pw.configured() else "; " + NO_ACCOUNT_HINT),
                                             ["look at the box at its vendor; nothing was sent"], detail=pw.name)
                     self._sleep(10)
                     self.tunnel()                            # the door may have moved while it booted

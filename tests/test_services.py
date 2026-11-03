@@ -1008,5 +1008,79 @@ def test_install_sh_refuses_a_comfy_port_that_is_not_a_port_before_it_writes_any
             assert r.returncode == 1 and "CLOUDGPU_COMFY_PORT" in r.stderr and not (home / "h3host").exists(), (bad, r.returncode, r.stderr)
 
 
+def test_the_operators_voxcpm_layout_is_the_default_and_a_copy_that_runs_is_found_before_start_sh_is_called():
+    # /root/voxcpm-svc/start.sh: kills the pid in svc.pid, then starts voxcpm_service.py in the background and writes svc.pid
+    with world(vox=False) as w:
+        svc = w.base / "voxcpm-svc"
+        svc.mkdir()
+        (svc / "voxcpm_service.py").write_text(FAKE_VOX.replace("server.py", "voxcpm_service.py"))
+        (svc / "port.txt").write_text(str(w.vox_port))
+        (svc / "delay.txt").write_text("3")
+        (svc / "start.sh").write_text(f'#!/bin/bash\ncd "$(dirname "$0")"\n[ -f svc.pid ] && kill "$(cat svc.pid)" 2>/dev/null\n'
+                                       f'nohup "{sys.executable}" "$PWD/voxcpm_service.py" --port {w.vox_port} --bind 127.0.0.1 >> service.log 2>&1 &\necho $! > svc.pid\n')
+        p = services.make_plan("voxcpm", w.cfg(), w.dir, w.env)
+        assert p["argv"][-1] == str(svc / "start.sh") and Path(p["argv"][0]).name in ("bash", "sh") and p["cwd"] == svc and "voxcpm_service" in p["match"], p
+        # the service is already running and still loading (not listening): start.sh would kill it, so it must not be called
+        hand = subprocess.Popen([sys.executable, str(svc / "voxcpm_service.py"), "--port", str(w.vox_port), "--bind", "127.0.0.1"], stdout=subprocess.DEVNULL)
+        try:
+            time.sleep(0.5)
+            (svc / "svc.pid").write_text(str(hand.pid))
+            out = w.up()
+            assert len(lines(svc / "launches.log")) == 1 and hand.poll() is None, ("start.sh was called and the running copy killed", out)
+            assert w.desc("voxcpm")["state"] == "up"
+            # it answers: left alone, also without any waiting
+            w.up()
+            assert len(lines(svc / "launches.log")) == 1 and hand.poll() is None
+        finally:
+            hand.kill()
+            hand.wait()
+        # nothing runs: start.sh is called once, and a second start leaves what it started alone
+        w.up()
+        assert len(lines(svc / "launches.log")) == 2 and w.desc("voxcpm")["state"] == "up"
+        w.up()
+        assert len(lines(svc / "launches.log")) == 2
+        for rec in lines(svc / "launches.log"):
+            with contextlib.suppress(OSError):
+                os.kill(rec["pid"], signal.SIGTERM)
+
+
+def test_the_default_search_folders_include_root_and_the_operators_comfyui_python_comes_before_the_path_ones():
+    bases = [str(b) for b in services.search_bases(Path("/x"), {})]
+    assert "/root" in bases and "/root/autodl-tmp" in bases
+    with _t.tmpdir() as d:
+        root = Path(d) / "ComfyUI"
+        (root / "custom_nodes").mkdir(parents=True)
+        (root / "main.py").write_text("")
+        seen = []
+        real = services.has_torch
+        services.has_torch = lambda py: seen.append(py) or False
+        try:
+            services.find_comfy_python({}, root)
+        finally:
+            services.has_torch = real
+        mc = [i for i, x in enumerate(seen) if x.endswith("miniconda3/bin/python")]
+        assert not mc or mc[0] <= 2, seen          # the miniconda python (where it exists) is tried before python3 on the PATH
+
+
+def test_the_services_own_command_line_is_never_taken_for_a_copy_of_a_service_but_a_service_named_like_it_is_found():
+    assert services.SELF_CMD.search("/usr/bin/python3 /root/h3host/services.py up --dir /root/h3host")
+    assert services.SELF_CMD.search("python services.py status")
+    assert not services.SELF_CMD.search("/root/miniconda3/bin/python /root/voxcpm-svc/voxcpm_services.py --port 8190")
+
+
+def test_a_launchers_match_finds_the_python_that_runs_its_service_and_not_an_editor_or_a_tail_that_names_the_file():
+    with _t.tmpdir() as d:
+        launcher = Path(d) / "start.sh"
+        launcher.write_text('#!/bin/bash\ncd /root/voxcpm-svc\nnohup /root/miniconda3/bin/python /root/voxcpm-svc/voxcpm_service.py --port 8190 --bind 127.0.0.1 >> service.log 2>&1 &\n')
+        import re as _re
+        rx = _re.compile(services.launcher_match(launcher))
+        for cmd in ("/root/miniconda3/bin/python /root/voxcpm-svc/voxcpm_service.py --port 8190 --bind 127.0.0.1", "python voxcpm_service.py", "python3 -u ./voxcpm_service.py",
+                    f"bash {launcher}", "/root/voxcpm-svc/voxcpm_service.py --port 8190"):
+            assert rx.search(cmd), cmd
+        for cmd in ("vim /root/voxcpm-svc/voxcpm_service.py", "tail -f service.log voxcpm_service.py", "grep voxcpm_service.py /var/log/x", "/bin/zsh -c pkill -f voxcpm_service",
+                    "python other_service.py", "python /root/voxcpm-svc/voxcpm_service.py.bak"):
+            assert not rx.search(cmd), cmd
+
+
 if __name__ == "__main__":
     _t.main(globals())

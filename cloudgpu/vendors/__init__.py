@@ -101,6 +101,11 @@ class Vendor:
         (a bad request, no balance, no token). A vendor that does not know says False: the failure is then reported as it came, and not retried."""
         return False
 
+    def stock(self, data_centers: list[str] | None = None) -> list[dict]:
+        """Free cards now, read-only and without the account's token: one row per (data center, card) with `data_center`, `spec` (None when the vendor's own id is not known here),
+        `card`, `idle` and `total`. A vendor with no such read says so (kind unknown). The numbers are a snapshot: a power-on can still be refused."""
+        self._no("stock read")
+
     def gpu_specs(self) -> dict[str, str]:
         """The vendor's card spec ids and what the vendor's page calls them."""
         return {}

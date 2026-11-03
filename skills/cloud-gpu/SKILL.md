@@ -29,6 +29,8 @@ never release a box you did not make. Refused (`over_quota`, `not_allowed`)? say
 4. **Power.** `autodl` is the default backend: `CLOUDGPU_INSTANCE` and `AUTODL_DEV_TOKEN` power the box on and off. A box that is always on, a pass, or a vendor with no API: `CLOUDGPU_POWER=none`.
    `Box.ensure_up()` powers a box on without asking (by design: whoever holds the account token and the instance id is the operator); do not give a process those two if it must not start billing.
    A day or month pass is paid anyway: leave `CLOUDGPU_AUTOOFF` unset. A new cloud with an API is one `Vendor` module (docs, "Cloud vendors and power"): the power backend, `instances` and `status` then work for it.
+3c. **Is a card free?** `python3 -m cloudgpu instances stock [--data-center DC] [--spec ID]` (free read, no token; exit 0 a card is free, 3 none is): run it before a power-on and do not start one on exit 3. It is a snapshot of the market page,
+   not a promise. A refusal of `暂无库存` or `ServerBusy` is no stock, not a fault: wait and retry within the time and money you were given, and say so; never switch to a smaller card than the work needs (a 40 GB model does not fit a 32G card).
 4a. **A pass ends.** Passes (daily, weekly, monthly) are the base, bought and renewed by a person in the console; you cannot (the API only creates hourly instances). `instances expiry` (or `status`, `ensure`) names each
    pass that ends in under `CLOUDGPU_PASS_WARN_DAYS` (default 3) or has ended: tell the account holder, with the box, the end time and the line as printed. A pass that is only switched off is powered on (`ensure`); an hourly box you made is
    released when the work is done. `docs/how-to-run-boxes.md` has the table.

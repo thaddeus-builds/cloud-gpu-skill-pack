@@ -26,11 +26,56 @@ PROOF_EVERY_S = 60                               # at a local address the proof 
 API = "/api/v1/comfyui/comfyui_workflow"
 
 
+def _service(h: dict | None, name: str) -> tuple[str, str]:
+    """(state, reason) of one service in a /health answer: up | starting | down | absent | unknown. ComfyUI is `up` whenever `comfy` is true; an adapter older than 0.22.0 has no `services`."""
+    if not isinstance(h, dict):
+        return "unknown", ""
+    if name == "comfy" and h.get("comfy"):
+        return "up", ""
+    svc = h.get("services")
+    e = svc.get(name) if isinstance(svc, dict) else None
+    if isinstance(e, dict):
+        r = e.get("reason")
+        st = e.get("state")
+        if st == "up" and name == "comfy":                        # the `comfy` key is the one fact; a `services` that says up beside a false key is not believed
+            return "unknown", "the adapter says ComfyUI answers in `services` and does not in `comfy`"
+        return (st if st in ("up", "starting", "down", "absent") else "unknown"), (str(r)[:300] if r else "")
+    return "unknown", ""
+
+
+LABEL = {"comfy": "ComfyUI", "voxcpm": "VoxCPM"}
+
+
+def _check_need(need) -> tuple:
+    """`need` is a tuple or list of the service names the adapter reports, at least one; anything else is the caller's bug."""
+    if isinstance(need, str) or not isinstance(need, (tuple, list)) or not need or any(n not in ("comfy", "voxcpm") for n in need):
+        raise ValueError('ensure_up(need=...) takes a non-empty tuple of "comfy" and/or "voxcpm"')
+    return tuple(need)
+
+
+def _not_up(h: dict | None, need) -> list[tuple[str, str, str]]:
+    """The needed services that are not up: [(name, state, reason)]; with no answer at all, each is unknown."""
+    out = []
+    for n in need:
+        st, r = _service(h, n)
+        if st != "up":
+            out.append((n, st, r))
+    return out
+
+
+def _only_starting(h: dict | None, wait: list) -> bool:
+    """The adapter answers (its worker is alive) and a needed service that is not up says it is starting, the others starting or down (VoxCPM reads down until start.sh reaches it):
+    the box is on and booting."""
+    return (isinstance(h, dict) and h.get("ok") is not False and any(st == "starting" for _n, st, _r in wait)
+            and all(st in ("starting", "down") for _n, st, _r in wait))
+
+
 class Box:
     def __init__(self, env: Mapping | None = None, *, spawn=tunnel.spawn, sleep=time.sleep):
         self.env = os.environ if env is None else env
         self._spawn, self._sleep = spawn, sleep
         self._up, self._ready, self._power = threading.Lock(), False, None
+        self._ready_for: set = set()                  # the services the last successful ensure_up saw up: a call that needs more is not answered from `_ready`
         self._proved, self._powered, self._hooked = None, False, False      # when the last proof passed (monotonic); this process sent the power-on; the exit hook is registered
 
     def get(self, name: str) -> str | None:
@@ -140,34 +185,68 @@ class Box:
             tunnel.parse_ssh(f"{host}:{port}")
         return self._spawn(tunnel.argv(key, user, host, port, local, remote, known))
 
-    def ensure_up(self) -> None:
-        """Return when the box answers /health with ComfyUI up: open the tunnel when it is configured, and power the box on first when it is off and a
-        backend can. By design this powers a box on WITHOUT asking a person: who may power boxes on is decided by whoever holds the account's token and
-        CLOUDGPU_INSTANCE (the operator team), not by an agent or a customer, so a caller that must not cost money does not give the process those two.
-        The `--yes` gate belongs to the CLI (`instances power-on`), which a person runs. With CLOUDGPU_AUTOOFF the box is powered off at exit, but only
-        when THIS process powered it on."""
+    def ensure_up(self, need: tuple[str, ...] = ("comfy",)) -> None:
+        """Return when the box answers /health with every service in `need` up (default ComfyUI; "voxcpm" for a caller that speaks): open the tunnel when it is configured,
+        and power the box on first when it is off and a backend can. By design this powers a box on WITHOUT asking a person: who may power boxes on is decided by whoever holds
+        the account's token and CLOUDGPU_INSTANCE (the operator team), not by an agent or a customer, so a caller that must not cost money does not give the process those two.
+        The `--yes` gate belongs to the CLI (`instances power-on`), which a person runs. With CLOUDGPU_AUTOOFF the box is powered off at exit, but only when THIS process powered it on.
+        A box whose adapter answers and says a needed service is `starting` (0.22.0: ComfyUI takes 2 to 3 minutes after a boot) is waited for, up to UP_TIMEOUT_S, polling every 10 s,
+        with no power call (it is on); with `CLOUDGPU_POWER=none` a needed service that is `down` or `absent` is refused at once with the adapter's own reason."""
         with self._up:
-            if self._ready and self.reprove():
+            need = _check_need(need)
+            if self._ready and set(need) <= self._ready_for and self.reprove():
                 return
             self.tunnel()
             h = self.health()
-            if not (h and h.get("comfy")):
+            wait = _not_up(h, need)
+            if wait:
                 pw = self.power
-                if pw.name == "none" or pw.status() in OFF_STATUS:       # a box that is starting (or whose state is unknown) is waited for, not powered on again
+                self._refuse_if_unreported(h, wait)
+                if pw.name == "none":
+                    self._refuse_if_stopped(h, wait)                 # the adapter says why a service will not come: nothing here can start it
+                if _only_starting(h, wait):
+                    pass                                             # the box is on and the adapter says it is coming up: nothing to power on, only to wait
+                elif pw.name == "none" or pw.status() in OFF_STATUS:     # a box that is starting (or whose state is unknown) is waited for, not powered on again
                     pw.power_on(START_COMMAND)               # `none` refuses with what a person must do
                     self._powered = True
                     self._register_power_off()               # from here, even a timeout or an error leaves the box to the exit hook
                 end = time.time() + UP_TIMEOUT_S
-                while not (h and h.get("comfy")):
+                while wait:
                     if time.time() > end:
-                        c = ((h or {}).get("services") or {}).get("comfy") if isinstance((h or {}).get("services"), dict) else None
-                        why = f"; the adapter answers and says ComfyUI is {c.get('state')}: {c.get('reason')}" if isinstance(c, dict) and c.get("reason") else ""
-                        raise CloudGpuError("timeout", f"the box did not come up in {UP_TIMEOUT_S}s" + why + ("" if pw.configured() else "; " + NO_ACCOUNT_HINT),
+                        why = "".join(f"; the adapter answers and says {LABEL[n]} is {st}: {r}" for n, st, r in wait if r)
+                        hint = "; " + NO_ACCOUNT_HINT if not pw.configured() and not isinstance(h, dict) else ""      # said when nothing answered, not when the adapter did
+                        raise CloudGpuError("timeout", f"the box did not come up in {UP_TIMEOUT_S}s" + why + hint,
                                             ["look at the box at its vendor; nothing was sent"], detail=pw.name)
                     self._sleep(10)
                     self.tunnel()                            # the door may have moved while it booted
                     h = self.health()
+                    wait = _not_up(h, need)
+                    if wait:
+                        self._refuse_if_unreported(h, wait)
+                    if wait and pw.name == "none":
+                        self._refuse_if_stopped(h, wait)     # it was starting and stopped: no reason to wait out the rest
+            self._ready_for = (self._ready_for if self._ready else set()) | set(need)
             self._ready = True
+
+    def _refuse_if_unreported(self, h: dict | None, wait: list) -> None:
+        """A needed service other than ComfyUI that the answering adapter cannot tell (an adapter older than 0.22.0 has no `services`, or it could not read its record): neither a wait
+        nor a power-on can change that, so it is said at once. (ComfyUI has its own `comfy` key, which every adapter has.)"""
+        if not isinstance(h, dict) or h.get("ok") is False:
+            return
+        for n, st, r in wait:
+            if st == "unknown" and n != "comfy":
+                raise CloudGpuError("down", f"the box answers, but its adapter does not say whether {LABEL[n]} is up" + (f": {r}" if r else " (an adapter older than 0.22.0 does not report it)"),
+                                    ["python3 -m cloudgpu status", "update the adapter on the box (docs, 'Set up a box')"], detail=n)
+
+    def _refuse_if_stopped(self, h: dict | None, wait: list) -> None:
+        """With no power backend: the adapter answers and a needed service is absent, or down while none is starting, with a reason, which is what a person must read; nothing here can start it."""
+        if not isinstance(h, dict) or h.get("ok") is False:
+            return
+        coming = any(st == "starting" for _n, st, _r in wait)        # start.sh starts ComfyUI first and VoxCPM after it: until then VoxCPM reads "down: no start recorded yet"
+        for n, st, r in wait:
+            if r and (st == "absent" or (st == "down" and not coming)):
+                raise CloudGpuError("down", f"the box answers, but {LABEL[n]} is {st}: {r}",
+                                    [f"{n} is not starting by itself: look at the box (sh ~/h3host/start.sh starts what is down; a person runs it)", "python3 -m cloudgpu status"], detail=n)
 
     # ---- the line of callers on other machines (line.py) ----
     def line_join(self, label: str = "") -> dict | None:

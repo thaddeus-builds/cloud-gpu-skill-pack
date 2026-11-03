@@ -1,7 +1,8 @@
 """cloudgpu/adapter.py, the audio-locked workflow (0.20.0), offline: a fake ComfyUI stands in for the card and answers /object_info like ComfyUI does.
 
-minimax_h3_image_audio_locked is the audio-driven take with one more node that anchors the take's own audio: the official MiniMaxH3AddGuide (default) or the third-party
-VRGDG_MiniMaxH3AudioDrive (off unless the operator sets CLOUDGPU_ALLOW_NODE_VRGDG=1). What these tests hold: the audiodrive graph is the one measured on a 4090 (modulo model names); the
+minimax_h3_image_audio_locked anchors the take's own audio: the official lock (default, 0.21.0, "E3": core nodes only, the line text in, the three-line prompt built here), the core node
+MiniMaxH3AddGuide, or the third-party VRGDG_MiniMaxH3AudioDrive (off unless the operator sets CLOUDGPU_ALLOW_NODE_VRGDG=1). What these tests hold: the official graph is the operator's tested E3
+graph (modulo the box's file names and the take's fields); the audiodrive graph is the one measured on a 4090 (modulo model names); the
 addguide graph changes the unlocked one in exactly the two places its definition asks; no model file name is written in the lock code; the unlocked workflows build exactly the
 graphs of 0.19.0; a lock that cannot be served is a coded error and never another graph; /health says what is served and why; the licence switch is read from the environment."""
 
@@ -32,7 +33,18 @@ DEFS = {
                  "output": ["CONDITIONING"], "python_module": "comfy_extras.nodes_minimax_h3"},
     "audiodrive": {"input": {"required": {"av_latent": ["LATENT"], "source_audio": ["AUDIO"], "audio_vae": ["VAE"]}},
                    "output": ["LATENT", "AUDIO"], "python_module": f"custom_nodes.{PREFIX}"},
+    "official": {"input": {"required": {"video_latent": ["LATENT"], "audio_latent": ["LATENT"]}}, "output": ["LATENT"], "python_module": "comfy_extras.nodes_lt"},
 }
+MORE_DEFS = {n: {"input": {"required": {i: ["X"] for i in ins}}, "python_module": "nodes"} for n, ins in adapter.LOCK_MORE["official"].items()}
+
+
+def node_defs(keys):
+    """What a fake ComfyUI's /object_info knows for these locks (the official lock needs five core nodes)."""
+    out = {adapter.LOCK_NODES[k]: DEFS[k] for k in keys}
+    if "official" in keys:
+        out.update(MORE_DEFS)
+    return out
+
 
 # The graph the operator measured on a real 4090 (2026-11-03: audio correlation 0.945, same still and voice), API format, with its placeholders kept as they were.
 TESTED = {
@@ -59,6 +71,7 @@ TESTED = {
         "width": 768, "height": 1344, "length": 124, "ref_image_size": "match", "ref_images.ref_image_0": ["5", 0], "ref_audios.ref_audio_0": ["6", 0]}},
     "21": {"class_type": "VRGDG_MiniMaxH3AudioDrive", "inputs": {"av_latent": ["7", 1], "source_audio": ["6", 0], "audio_vae": ["4", 0]}},
 }
+E3_FILE = json.loads((Path(__file__).parent / "e3_lockaudio_api.json").read_text())        # the operator's tested graph, a data file (never run here)
 PRESET_4090 = json.loads((Path(_t.ROOT) / "cloudgpu" / "onbox" / "models.4090.json").read_text())
 
 
@@ -83,11 +96,13 @@ def build(lock=None, **kw):
 
 def box(d, nodes=("addguide",), allow=False):
     b = Box(d, allow_vrgdg=allow)
-    b.comfy.nodes = {adapter.LOCK_NODES[k]: DEFS[k] for k in nodes}
+    b.comfy.nodes = node_defs(nodes)
     return b
 
 
-BODY = {**REF, "audio_duration": 5, "seed": 3, "prompt": "[Shot 1] <Subject 1> (S1) looks into the lens and says, <d>[Chinese] 你好</d>\n<Audio 1>: fully_copy"}
+BODY = {**REF, "audio_duration": 5, "seed": 3, "lock": "addguide", "prompt": "[Shot 1] <Subject 1> (S1) looks into the lens and says, <d>[Chinese] 你好</d>\n<Audio 1>: fully_copy"}
+LINE = "今天先说三件小事，第一件，把水杯放在手边。"
+OBODY = {**REF, "audio_duration": 4.8, "seed": 3, "line": LINE}           # the official lock (the default): the line, no prompt, no lock key
 
 
 def test_the_audiodrive_graph_is_the_one_measured_on_the_4090():
@@ -175,7 +190,7 @@ def test_every_lock_value_builds_a_graph_that_is_not_the_unlocked_one_or_stops()
     assert set(adapter.LOCK_BUILDERS) == set(adapter.LOCKS) and set(adapter.LOCK_NODES) == set(adapter.LOCKS) - {"custom"}
 
 
-def test_a_locked_take_runs_with_the_official_node_by_default_and_the_adapter_adds_no_words_of_its_own():
+def test_an_addguide_take_runs_with_the_core_node_and_the_adapter_adds_no_words_of_its_own():
     with _t.tmpdir() as d:
         b = box(d)
         try:
@@ -208,7 +223,7 @@ def test_the_audiodrive_lock_is_refused_with_the_licence_words_unless_the_operat
             code, doc = b.call("POST", LOCKED, {**BODY, "lock": "audiodrive"})
             assert code == 400 and doc["code"] == "RequestParameterIsWrong" and doc["msg"].startswith("lock_not_allowed:"), doc
             for word in ("VRGDG_MiniMaxH3AudioDrive", "comfyui-vrgamedevgirl", "VRGameDevGirl Community and Commercial License v1.0", "not an open licence", "commercial licence",
-                         "CLOUDGPU_ALLOW_NODE_VRGDG=1", "owner", "addguide"):
+                         "CLOUDGPU_ALLOW_NODE_VRGDG=1", "owner", "lock=official"):
                 assert word in doc["msg"], (word, doc["msg"])
             assert not b.comfy.graphs and not list(b.host.tasks_dir.iterdir()) and not list((b.root / "input").iterdir()), "nothing was fetched, saved or sent"
             # the same refusal when ComfyUI knows nothing yet: the licence is not waiting on a node list
@@ -226,7 +241,7 @@ def test_the_audiodrive_lock_is_refused_with_the_licence_words_unless_the_operat
 
 def test_the_audiodrive_lock_runs_when_the_operator_switched_it_on_and_health_says_so_with_the_pack_and_its_commit():
     with _t.tmpdir() as d:
-        b = box(d, nodes=("addguide", "audiodrive"), allow=True)
+        b = box(d, nodes=("official", "addguide", "audiodrive"), allow=True)
         try:
             pack = b.root / "custom_nodes" / PREFIX
             (pack / ".git").mkdir(parents=True)
@@ -238,7 +253,7 @@ def test_the_audiodrive_lock_runs_when_the_operator_switched_it_on_and_health_sa
             g = b.comfy.graphs[-1]
             assert g["21"]["class_type"] == "VRGDG_MiniMaxH3AudioDrive" and "14" not in g and g["15"]["inputs"]["audio"] == ["21", 1]
             h = b.call("GET", "/health", token=None)[1]
-            assert h["audio_lock"] == ["addguide", "audiodrive"], h
+            assert h["audio_lock"] == ["official", "addguide", "audiodrive"], h
             det = h["audio_lock_detail"]
             assert det["checked"] is True
             assert det["addguide"]["node"] == "MiniMaxH3AddGuide" and det["addguide"]["present"] is True and det["addguide"]["usable"] is True
@@ -297,12 +312,14 @@ def test_a_lock_whose_node_is_missing_is_a_coded_error_that_names_the_node_and_n
             code, doc = b.call("POST", LOCKED, BODY)
             assert code == 400 and doc["code"] == "RequestParameterIsWrong" and doc["msg"].startswith("lock_node_missing:") and "MiniMaxH3AddGuide" in doc["msg"], doc
             assert "no other graph was used" in doc["msg"]
+            code, doc = b.call("POST", LOCKED, OBODY)                     # the default lock, too
+            assert code == 400 and doc["msg"].startswith("lock_node_missing:") and "LTXVConcatAVLatent" in doc["msg"] and "update ComfyUI" in doc["msg"], doc
             code, doc = b.call("POST", LOCKED, {**BODY, "lock": "audiodrive"})
             assert code == 400 and doc["msg"].startswith("lock_node_missing:") and "VRGDG_MiniMaxH3AudioDrive" in doc["msg"] and "comfyui-vrgamedevgirl" in doc["msg"], doc
             assert not b.comfy.graphs, "no fallback to the unlocked graph, to the other lock, or to anything"
             assert not list(b.host.tasks_dir.iterdir()) and not list((b.root / "input").iterdir()) and b.host.busy() == 0
             # the unlocked workflow is not affected by the lock nodes at all
-            code, doc = b.call("POST", UNLOCKED, BODY)
+            code, doc = b.call("POST", UNLOCKED, {k: v for k, v in BODY.items() if k != "lock"})
             assert code == 200 and b.wait(doc["data"]["task_id"])["status"] == "SUCCESS"
             assert "21" not in b.comfy.graphs[-1] and "14" in b.comfy.graphs[-1]
         finally:
@@ -380,14 +397,13 @@ def test_a_lock_the_box_does_not_serve_or_sent_to_a_workflow_that_does_not_lock_
     with _t.tmpdir() as d:
         b = box(d, nodes=("addguide", "audiodrive"), allow=True)
         try:
-            cases = [(LOCKED, {**BODY, "lock": "custom"}, "lock_not_implemented:"), (LOCKED, {**BODY, "lock": "nope"}, "lock_unknown:"), (LOCKED, {**BODY, "lock": ""}, "lock_unknown:"),
+            cases = [(LOCKED, {**BODY, "lock": "custom"}, "lock_unknown:"), (LOCKED, {**BODY, "lock": "nope"}, "lock_unknown:"), (LOCKED, {**BODY, "lock": ""}, "lock_unknown:"),
                      (LOCKED, {**BODY, "lock": ["addguide"]}, "lock_unknown:"), (LOCKED, {**BODY, "lock": 1}, "lock_unknown:"),
-                     (UNLOCKED, {**BODY, "lock": "addguide"}, "lock_wrong_workflow:"), (f"{API}/minimax_h3_lightx2v", {"lock": "addguide", "prompt": "x", "first_frame": PNG, "last_frame": PNG, "duration": 4}, "lock_wrong_workflow:"),
+                     (UNLOCKED, BODY, "lock_wrong_workflow:"), (UNLOCKED, {**OBODY, "lock": None}, "lock_wrong_workflow:"), (UNLOCKED, {**BODY, "lock": None, "line_language": "Chinese"}, "lock_wrong_workflow:"), (f"{API}/minimax_h3_lightx2v", {"lock": "addguide", "prompt": "x", "first_frame": PNG, "last_frame": PNG, "duration": 4}, "lock_wrong_workflow:"),
                      (f"{API}/minimax_h3_t2v", {"lock": "audiodrive", "prompt": "x", "duration": 4}, "lock_wrong_workflow:")]
             for url, body, code_word in cases:
                 code, doc = b.call("POST", url, body)
                 assert code == 400 and doc["msg"].startswith(code_word), (url, body.get("lock"), doc)
-            assert "reserved for a future lock" in b.call("POST", LOCKED, {**BODY, "lock": "custom"})[1]["msg"]
             assert not b.comfy.graphs and not list(b.host.tasks_dir.iterdir())
             # the locked workflow keeps the unlocked one's validation
             for bad in ({**BODY, "ref_image_0": ""}, {**BODY, "ref_audio_0": PNG}, {**BODY, "audio_duration": 16}, {**BODY, "resolution": "1080p竖"}, {**BODY, "ref_image_2": PNG}):
@@ -456,7 +472,7 @@ def run_adapter(d, switch):
     comfy_root = Path(d) / "comfy"
     (comfy_root / "input").mkdir(parents=True, exist_ok=True)
     fc = FakeComfy(comfy_root)
-    fc.nodes = {adapter.LOCK_NODES[k]: DEFS[k] for k in adapter.LOCK_NODES}
+    fc.nodes = node_defs(adapter.LOCK_NODES)
     port = free_port()
     env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "CLOUDGPU_TOKEN": TOKEN}
     if switch is not None:
@@ -488,19 +504,19 @@ def test_only_an_explicit_one_in_the_environment_switches_the_third_party_lock_o
         for i, (value, on) in enumerate(cases):
             h, err = run_adapter(f"{d}/{i}", value)
             assert h["audio_lock_detail"]["audiodrive"]["allowed"] is on, (value, h["audio_lock_detail"]["audiodrive"])
-            assert (h["audio_lock"] == ["addguide", "audiodrive"]) is on and (h["audio_lock"] == ["addguide"]) is (not on), (value, h["audio_lock"])
+            assert h["audio_lock"] == (["official", "addguide", "audiodrive"] if on else ["official", "addguide"]), (value, h["audio_lock"])
             assert ("ENABLED" in err) is on, (value, err)
 
 
 def test_a_node_that_vanished_inside_the_cache_window_is_refused_at_the_door_and_stops_a_take_that_was_already_accepted():
     with _t.tmpdir() as d:
-        b = box(d, nodes=("addguide", "audiodrive"), allow=True)
+        b = box(d, nodes=("official", "addguide", "audiodrive"), allow=True)
         try:
             h = b.call("GET", "/health", token=None)[1]
-            assert h["audio_lock"] == ["addguide", "audiodrive"], "the cache is primed with both nodes"
+            assert h["audio_lock"] == ["official", "addguide", "audiodrive"], "the cache is primed with every node"
             b.comfy.nodes = {}                                          # a ComfyUI restart without them, inside LOCK_CACHE_S
-            for lock in ("addguide", "audiodrive"):
-                code, doc = b.call("POST", LOCKED, {**BODY, "lock": lock})
+            for lock in ("official", "addguide", "audiodrive"):
+                code, doc = b.call("POST", LOCKED, {**(OBODY if lock == "official" else BODY), "lock": lock})
                 assert code == 400 and doc["msg"].startswith("lock_node_missing:") and adapter.LOCK_NODES[lock] in doc["msg"], (lock, doc)
             assert not b.comfy.graphs
             b.comfy.nodes = {"VRGDG_MiniMaxH3AudioDrive": DEFS["audiodrive"]}        # and one that came back is used at once
@@ -515,7 +531,7 @@ def test_a_widened_bind_does_not_tell_anyone_the_commit_or_version_of_the_third_
         for bind, shown in (("127.0.0.1", True), ("0.0.0.0", False)):
             b = Box(d + "/" + bind, bind=bind, allow_vrgdg=True)
             try:
-                b.comfy.nodes = {adapter.LOCK_NODES[k]: DEFS[k] for k in adapter.LOCK_NODES}
+                b.comfy.nodes = node_defs(adapter.LOCK_NODES)
                 pack = b.root / "custom_nodes" / PREFIX
                 (pack / ".git").mkdir(parents=True)
                 (pack / ".git" / "HEAD").write_text(SHA_A + "\n")
@@ -532,7 +548,7 @@ def test_a_widened_bind_does_not_tell_anyone_the_commit_or_version_of_the_third_
 def test_the_new_lock_code_names_no_model_and_no_step_count():
     import ast
     tree = ast.parse(Path(adapter.__file__).read_text())
-    new = {"lock_addguide", "lock_audiodrive", "lock_custom", "plan_lock", "lock_words", "lock_entry", "node_inputs", "pack_of", "git_head", "pack_version",
+    new = {"lock_official", "official_frames", "official_length", "clean_line", "official_prompt", "lock_addguide", "lock_audiodrive", "plan_lock", "lock_words", "lock_entry", "node_inputs", "pack_of", "git_head", "pack_version",
            "unknown_locks", "lock_caps", "lock_problem"}
 
     def clean(node, what):
@@ -550,6 +566,179 @@ def test_the_new_lock_code_names_no_model_and_no_step_count():
     block = [n for n in graph_fn.body if isinstance(n, ast.If) and "lock" in ast.dump(n.test)]
     assert len(block) == 1, "graph() has one lock block"
     clean(block[0], "graph()'s lock block")
+
+
+# ---- the official lock, "E3" (0.21.0) ----------------------------------------------------------------------------------
+
+E3_LINE = E3_FILE["8"]["inputs"]["prompt"].split("[Chinese] ")[1].split("</d>")[0]
+
+
+def e3_build(**kw):
+    args = dict(w=768, h=1344, seconds=4.5, image="h3f_ref.png", audio="h3f_drive.wav", prompt=adapter.official_prompt(E3_LINE), seed=973438621, prefix="h3lock/E3-1")
+    return adapter.graph("ref", **{**args, **kw}, lock="official")
+
+
+def test_the_official_graph_is_the_operators_tested_e3_graph_node_for_node():
+    with Models(PRESET_4090):
+        assert e3_build() == E3_FILE, "the file is the graph that ran on a 4090 (captions 1 of 9, audio correlation 0.999 to 1.000)"
+    assert E3_FILE["8"]["inputs"]["length"] == 124 and E3_FILE["19"]["inputs"]["length"] == 108 and E3_FILE["14"]["inputs"]["noise_seed"] == 973438621
+    # on another image the file names, the steps and the seed come from the box, and nothing else changes
+    names = {"unet_ref": "S/unet.safetensors", "lora_ref": "S/lora.safetensors", "steps_ref": 6, "clip": "S/clip.safetensors", "vae_video": "S/vv.safetensors", "vae_audio": "S/va.safetensors"}
+    with Models(names):
+        g = e3_build(seed=5)
+    assert (g["1"]["inputs"]["unet_name"], g["2"]["inputs"]["lora_name"], g["3"]["inputs"]["clip_name"], g["4"]["inputs"]["vae_name"], g["5"]["inputs"]["vae_name"]) == \
+        ("S/unet.safetensors", "S/lora.safetensors", "S/clip.safetensors", "S/vv.safetensors", "S/va.safetensors")
+    assert g["15"]["inputs"]["steps"] == 6 and g["14"]["inputs"]["noise_seed"] == 5
+    want = json.loads(json.dumps(E3_FILE))
+    want["1"]["inputs"]["unet_name"], want["2"]["inputs"]["lora_name"], want["3"]["inputs"]["clip_name"] = "S/unet.safetensors", "S/lora.safetensors", "S/clip.safetensors"
+    want["4"]["inputs"]["vae_name"], want["5"]["inputs"]["vae_name"] = "S/vv.safetensors", "S/va.safetensors"
+    want["15"]["inputs"]["steps"], want["14"]["inputs"]["noise_seed"] = 6, 5
+    assert g == want
+
+
+def test_the_official_graph_wires_the_audio_the_way_e3_does():
+    with Models(PRESET_4090):
+        g = e3_build()
+    classes = [n["class_type"] for n in g.values()]
+    assert "VAEDecodeAudio" not in classes and "MiniMaxH3AddGuide" not in classes and not any(c.startswith("VRGDG") for c in classes), "core nodes only, the audio is never decoded"
+    ref = g["8"]["inputs"]
+    assert ref["ref_audios.ref_audio_0"] == ["7", 0] and ref["audio_vae"] == ["5", 0] and g["9"]["inputs"] == {"audio": ["7", 0], "vae": ["5", 0]}, "one audio file feeds the latent and <Audio 1>"
+    assert g["20"]["inputs"]["audio"] == ["7", 0], "the original audio goes into the video"
+    assert g["10"]["inputs"]["value"] == 0.0 and g["11"]["inputs"] == {"samples": ["9", 0], "mask": ["10", 0]}, "the mask is on the audio latent only"
+    assert g["12"]["inputs"] == {"video_latent": ["8", 1], "audio_latent": ["11", 0]} and g["17"]["inputs"]["latent_image"] == ["12", 0]
+    assert g["16"]["inputs"]["conditioning"] == ["8", 0] and g["18"]["inputs"]["samples"] == ["17", 0] and g["19"]["inputs"]["image"] == ["18", 0]
+    assert g["13"]["inputs"]["sampler_name"] == "res_multistep" and g["15"]["inputs"]["scheduler"] == "simple" and g["15"]["inputs"]["denoise"] == 1.0
+    assert (ref["width"], ref["height"]) == (768, 1344) and g["21"]["inputs"]["filename_prefix"] == "h3lock/E3-1"
+
+
+def test_the_frame_count_and_the_length_follow_the_e3_rule_with_a_floor_of_124():
+    assert [adapter.official_frames(x) for x in (1, 4.5, 4.8, 5, 7, 15)] == [24, 108, 115, 120, 168, 360]
+    assert [adapter.official_length(x) for x in (1, 3, 4.5, 4.8, 5, 5.17, 5.2, 7, 15)] == [124, 124, 124, 124, 124, 124, 141, 175, 362]
+    for i in range(100, 1501):
+        sec = i / 100
+        frames, length = adapter.official_frames(sec), adapter.official_length(sec)
+        assert length >= max(frames, adapter.OFFICIAL_MIN_LENGTH) and length % 17 == 5, sec
+        assert length - frames < 17 or length == adapter.OFFICIAL_MIN_LENGTH, "no longer than the next 17k+5 above the frames (or the floor)"
+        if adapter.frames_for(sec) >= adapter.OFFICIAL_MIN_LENGTH:
+            assert length == adapter.frames_for(sec), "above the floor it is the rule every other graph uses"
+    with Models(PRESET_4090):
+        for sec, frames, length in ((4.8, 115, 124), (7, 168, 175), (15, 360, 362)):
+            g = e3_build(seconds=sec)
+            assert g["8"]["inputs"]["length"] == length and g["19"]["inputs"]["length"] == frames, sec
+
+
+def test_the_official_prompt_is_the_three_e3_lines_and_the_line_is_the_only_thing_that_changes():
+    p = adapter.official_prompt(E3_LINE)
+    assert p == E3_FILE["8"]["inputs"]["prompt"]
+    l1, l2, l3 = p.split("\n")
+    assert l1 == f"[Shot 1] <Subject 1> (S1) whose appearance comes from <Picture 1> looks into the lens and says, <d>[Chinese] {E3_LINE}</d>"
+    assert l2 == "<Audio 1>: fully_copy - the original audio of <Audio 1> is the complete final track; <Subject 1> (S1) lip-syncs exactly to it."
+    assert l3 == "No captions, subtitles, logos or on-screen text appear."
+    q = adapter.official_prompt("  Hello there.  ", "English")
+    assert q.split("\n")[0].endswith("<d>[English] Hello there.</d>") and q.split("\n")[1:] == [l2, l3]
+    for bad in (None, "", "   ", 5, "two\nlines", "tab\there", "a <b> c", "x</d>y", 'says "hi"', "\u201chi\u201d", "x" * (adapter.LINE_MAX_CHARS + 1)):
+        try:
+            adapter.official_prompt(bad)
+        except adapter.Refused as e:
+            assert str(e).startswith(("lock_line_required:", "lock_line_invalid:")), (bad, str(e))
+        else:
+            raise AssertionError(f"line {bad!r} was accepted")
+    assert adapter.official_prompt("x" * adapter.LINE_MAX_CHARS)
+    for bad in ("", "Chi\nnese", "<d>", "x", "a" * 30, 3, "Chinese]"):
+        try:
+            adapter.official_prompt("hi", bad)
+        except adapter.Refused as e:
+            assert str(e).startswith("lock_line_invalid:"), (bad, str(e))
+        else:
+            raise AssertionError(f"language {bad!r} was accepted")
+
+
+def test_the_default_lock_is_official_and_its_request_carries_the_line_not_a_prompt():
+    assert adapter.DEFAULT_LOCK == "official" and adapter.LOCKS == ("official", "addguide", "audiodrive")
+    p = adapter.plan(adapter.LOCKED_WORKFLOW, OBODY)
+    assert p["lock"] == "official" and p["seconds"] == 4.8 and p["prompt"] == adapter.official_prompt(LINE)
+    assert adapter.plan(adapter.LOCKED_WORKFLOW, {**OBODY, "line_language": "English"})["prompt"] == adapter.official_prompt(LINE, "English")
+    cases = [({**OBODY, "line": None}, "lock_line_required:"), ({k: v for k, v in OBODY.items() if k != "line"}, "lock_line_required:"), ({**OBODY, "line": "a\nb"}, "lock_line_invalid:"),
+             ({**OBODY, "prompt": "my own words"}, "lock_prompt_unused:"), ({**OBODY, "prompt": ""}, "lock_prompt_unused:"), ({**OBODY, "ref_image_1": PNG}, "lock_one_picture:"),
+             ({**BODY, "line": LINE}, "lock_line_unused:"), ({**BODY, "line_language": "Chinese"}, "lock_line_unused:"),
+             ({**OBODY, "lock": "audiodrive", "prompt": "p"}, "lock_line_unused:")]
+    for body, word in cases:
+        try:
+            adapter.plan(adapter.LOCKED_WORKFLOW, body)
+        except adapter.Refused as e:
+            assert str(e).startswith(word), (body, str(e))
+        else:
+            raise AssertionError(f"{body} was accepted")
+    assert adapter.plan(adapter.LOCKED_WORKFLOW, {**OBODY, "lock": "official", "resolution": "480p横"})["w"] == 864
+    assert adapter.plan(adapter.LOCKED_WORKFLOW, BODY)["prompt"] == BODY["prompt"], "the other locks take the request's own prompt as they did"
+
+
+def test_an_official_take_runs_on_core_nodes_with_the_line_in_the_prompt_and_queues_nothing_else():
+    with _t.tmpdir() as d:
+        b = box(d, nodes=("official",))
+        try:
+            code, doc = b.call("POST", LOCKED, OBODY)
+            assert code == 200 and doc["code"] == "Success", doc
+            r = b.wait(doc["data"]["task_id"])
+            assert r["status"] == "SUCCESS", r
+            g = b.comfy.graphs[-1]
+            assert g["8"]["inputs"]["prompt"] == adapter.official_prompt(LINE)
+            assert (g["8"]["inputs"]["width"], g["8"]["inputs"]["height"], g["8"]["inputs"]["length"], g["19"]["inputs"]["length"]) == (768, 1344, 124, 115)
+            assert g["14"]["inputs"]["noise_seed"] == 3 and g["1"]["inputs"]["unet_name"] == adapter.MODELS["unet_ref"] and g["15"]["inputs"]["steps"] == adapter.MODELS["steps_ref"]
+            assert g["6"]["inputs"]["image"].endswith(".png") and g["7"]["inputs"]["audio"].endswith(".wav")
+            assert [n["class_type"] for n in g.values()].count("SaveVideo") == 1 and len(b.comfy.graphs) == 1
+            assert b.host.load(doc["data"]["task_id"])["plan"]["lock"] == "official"
+            h = b.call("GET", "/health", token=None)[1]
+            assert h["audio_lock"] == ["official"], h
+            o = h["audio_lock_detail"]["official"]
+            assert o["node"] == "LTXVConcatAVLatent" and o["usable"] is True and o["problem"] is None and o["module"] == "comfy_extras.nodes_lt"
+            assert o["needs"] == ["LTXVConcatAVLatent", "VAEEncodeAudio", "SetLatentNoiseMask", "SolidMask", "ImageFromBatch"]
+        finally:
+            b.close()
+
+
+def test_the_official_lock_is_unusable_and_says_which_node_when_any_one_of_its_nodes_is_missing_or_changed():
+    with _t.tmpdir() as d:
+        b = box(d, nodes=("official",))
+        try:
+            for node in adapter.LOCK_MORE["official"]:
+                nodes = node_defs(("official",))
+                del nodes[node]
+                b.comfy.nodes = nodes
+                code, doc = b.call("POST", LOCKED, OBODY)
+                assert code == 400 and doc["msg"].startswith("lock_node_missing:") and f"needs the node {node}," in doc["msg"], (node, doc)
+                h = b.call("GET", "/health", token=None)[1]
+                assert h["audio_lock"] == [] and h["audio_lock_detail"]["official"]["present"] is True and h["audio_lock_detail"]["official"]["usable"] is False
+            thin = node_defs(("official",))
+            thin["SetLatentNoiseMask"] = {"input": {"required": {"samples": ["LATENT"]}}}
+            b.comfy.nodes = thin
+            code, doc = b.call("POST", LOCKED, OBODY)
+            assert code == 400 and doc["msg"].startswith("lock_node_incompatible:") and "SetLatentNoiseMask" in doc["msg"] and "mask" in doc["msg"], doc
+            thin = node_defs(("official",))
+            thin["LTXVConcatAVLatent"] = {"input": {"required": {"video_latent": ["LATENT"]}}}
+            b.comfy.nodes = thin
+            code, doc = b.call("POST", LOCKED, OBODY)
+            assert code == 400 and doc["msg"].startswith("lock_node_incompatible:") and "audio_latent" in doc["msg"], doc
+            assert not b.comfy.graphs and not list(b.host.tasks_dir.iterdir()), "nothing was fetched, saved or sent; no other graph"
+        finally:
+            b.close()
+
+
+def test_the_official_lock_needs_no_operator_switch_and_the_other_two_are_asked_for_by_name():
+    with _t.tmpdir() as d:
+        b = box(d, nodes=("official", "addguide", "audiodrive"), allow=False)
+        try:
+            h = b.call("GET", "/health", token=None)[1]
+            assert h["audio_lock"] == ["official", "addguide"]
+            assert b.call("POST", LOCKED, {**BODY, "lock": "audiodrive"})[1]["msg"].startswith("lock_not_allowed:")
+            code, doc = b.call("POST", LOCKED, OBODY)
+            assert code == 200 and b.wait(doc["data"]["task_id"])["status"] == "SUCCESS"
+            code, doc = b.call("POST", LOCKED, {k: v for k, v in BODY.items() if k != "lock"})
+            assert code == 400 and doc["msg"].startswith("lock_prompt_unused:"), "no lock key means the official lock: a prompt is not silently dropped"
+            code, doc = b.call("POST", LOCKED, BODY)
+            assert code == 200 and b.wait(doc["data"]["task_id"])["status"] == "SUCCESS" and b.comfy.graphs[-1]["21"]["class_type"] == "MiniMaxH3AddGuide"
+        finally:
+            b.close()
 
 
 if __name__ == "__main__":

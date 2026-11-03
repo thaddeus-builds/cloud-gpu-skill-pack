@@ -273,6 +273,16 @@ Read-only, and it needs no token and sends none (the developer token is refused 
 half minute); a free card now does not make a power-on succeed; whether an existing instance is tied to its own machine (so a free card elsewhere does not help it) is **not verified**, but there is one sample for it (2026-11-03: the page showed 1 free PRO6000 in the northwest, and a power-on of an existing PRO6000 instance in that data center was refused at once with 暂无库存); and every number seen
 so far was 0 (2026-11-03), so that the anonymous count equals what a logged-in page shows is not verified either. `ServerBusy 服务正忙` now counts as no stock (`ensure` retries it, as it does `暂无库存`).
 
+### A hard cap on how long a box stays on: `--max-minutes` (0.19.0)
+
+A box left on bills by the hour, and "shut it down when done" is the step that gets forgotten (it was written by hand by the remote agent on 2026-11-03, after it had to). `instances power-on ID --yes --max-minutes N` and
+`instances ensure ... --yes --max-minutes N` start a **guard** in the background for each box they switch on or create: after N minutes by the wall clock (a laptop that slept still acts when it wakes) it asks the vendor to shut the box down
+and reads the status until the vendor itself says `shutdown` (a refused request, `ServerBusy` included, is asked again a few times). The call prints the guard's `pid`, `off_at` and `log`; the log's last line is one JSON document, `off: true` only when the vendor's status says so.
+`instances guard ID --minutes N [--agent]` is the same in the foreground. Without `--yes` the dry run says `would_guard`. A cap is a number above 0 and at most a day. The guard never releases anything, and an `--agent` guard works only on a box the ledger shows this agent created.
+
+Limits, said plainly: the guard is a process on this machine, so a machine that is switched off or a guard that is killed shuts nothing (the vendor's balance is the other stop); it shuts the box down even if a take is running (a hard cap is that); and it was
+tested offline against a fake vendor, **not yet against a real box**: the first real use should be watched.
+
 ### Passes: the base, and the warning before one ends (0.16.0)
 
 The base capacity is **passes** (daily, weekly or monthly boxes) that **a person buys and renews in the vendor's console**; this package cannot do either (autodl's API only creates pay-as-you-go

@@ -191,7 +191,7 @@ def run_spend_today(rows: list[dict], now: float) -> float:
     """CNY the ledger shows run since local midnight, instance by instance (the budget gate's number, `--budget-cny`): a run starts at a `create` or `power-on` line and ends at the next
     `power-off`, `release` or `gone` line of that instance, at its recorded price per hour. A run with no end yet counts until `now`, except one with a `deadline` line (the guard's hard stop)
     and no `guard-failed` line after it: that run counts until its deadline, passed or not (the hours it is going to run are set aside before they pass, so the next power-on in the same
-    minute sees them). A box turned off by something that writes no ledger line (the vendor's console) therefore counts until its deadline, or until now when it has none: an upper bound. A line with no price counts at the last price the ledger knew for that instance."""
+    minute sees them). A box turned off by something that writes no ledger line (the vendor's console) therefore counts until its deadline, or until now when it has none: an upper bound. A line with no price counts at the last price the ledger knew for that instance. A `spend` line (`ledger add`) is money spent today outside the package and is added as it is."""
     start, total = day_start(now), 0.0
     open_: dict[str, dict] = {}
     price_of: dict[str, float] = {}
@@ -202,6 +202,10 @@ def run_spend_today(rows: list[dict], now: float) -> float:
 
     for r in rows:
         a, i, ts = r.get("action"), r.get("instance"), float(r.get("ts") or 0)
+        if a == "spend":                                        # a person recorded money spent outside the package (`ledger add`)
+            if ts >= start:
+                total += float(r.get("cny") or 0)
+            continue
         if not i:
             continue
         if r.get("price_cny_per_hour"):

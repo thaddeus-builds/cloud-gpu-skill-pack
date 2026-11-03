@@ -264,8 +264,21 @@ class Steward:
             plan: dict = {"dry_run": True, "would_power_on": [i.id for i in power_cands[:need]]}
             short = need - len(plan["would_power_on"])
             plan["would_create"] = short
-            if short > 0:
+            if max_minutes:
+                plan["would_guard"] = f"shut each box it turns on down after {max_minutes:g} minutes and confirm"
+            if budget is not None:
+                checks = {}
+                for i in power_cands[:need]:                                   # the numbers, so a person sees a refusal before `--yes`
+                    price = self.price_of(i.id, i.gpu_spec) if i.billing == "payg" else None
+                    try:
+                        checks[i.id] = {"price_cny_per_hour": price, **(self.gate(price, max_minutes, budget, f"powering on {i.id}") if i.billing == "payg" else {})}
+                    except CloudGpuError as e:
+                        checks[i.id] = {"price_cny_per_hour": price, "would_refuse": e.message}
+                plan["budget_checks"] = checks
+            if short > 0 or plan["would_power_on"]:
                 free = self._market(combos)
+                if not short > 0:
+                    plan["if_a_power_on_is_refused_for_no_stock"] = "a new box is created in this order, inside the allowance"
                 plan["order"] = [{"gpu_spec_uuid": s, "data_center": c, **({"free": free[(s, c)]} if free and (s, c) in free else {})} for s, c in combos]
                 try:
                     self.check_create({**template, "gpu_spec_uuid": specs[0]}, mine)

@@ -89,6 +89,22 @@ def instances(a, out=print) -> int:
             if budget is not None and (budget <= 0 or not cap):
                 out(json.dumps({"error": "--budget-cny must be above 0 and needs --max-minutes: the gate must know how long the box would run"}))
                 return 2
+            if not a.yes and c == "power-on" and budget is not None:
+                st = _steward(v, a)                                                 # the numbers, so a person sees the refusal before `--yes`
+                try:
+                    inst = v.get(a.id)
+                except CloudGpuError:
+                    inst = None
+                price = st.price_of(a.id, inst.gpu_spec if inst else None)
+                try:
+                    gate = st.gate(price, cap, budget, f"powering on {a.id}")
+                except CloudGpuError as e:
+                    if e.kind != "over_budget":
+                        raise
+                    gate = {"would_refuse": e.message}
+                out(json.dumps({"dry_run": True, "would": c, "id": a.id, "price_cny_per_hour": price, "would_guard": f"shut it down after {cap:g} minutes and confirm", **gate,
+                                "next": ["pass --yes (a person does) to power-on: it starts the hourly billing" if "would_refuse" not in gate else "the budget gate would refuse this: wait for tomorrow, or raise --budget-cny"]}, ensure_ascii=False))
+                return 0
             if not a.yes:
                 out(json.dumps({"dry_run": True, "would": c, "id": a.id, **({"would_budget": f"refuse unless today's hours run plus {cap:g} minutes stay within CNY {budget:g}"} if budget else {}), **({"would_guard": f"shut it down after {cap:g} minutes and confirm"} if cap else {}), "next": [f"pass --yes (a person does) to {c}" + (": it starts the hourly billing" if c == "power-on" else "")]}))
                 return 0
@@ -275,6 +291,31 @@ def ensure_cmd(a, v, out) -> int:
     return 0 if not r["missing"] else 1
 
 
+def ledger_cmd(a) -> int:
+    """`ledger today`: the CNY the gate counts as spent today and the rows behind it. `ledger add --cny X --by NAME`: a spend made outside the package, so `--budget-cny` counts it too."""
+    import math
+    import os
+    import time as _t
+    from . import quota
+    led = quota.Ledger(quota.ledger_path(os.environ))
+    if a.lcmd == "add":
+        if not (math.isfinite(a.cny) and 0 < a.cny <= 100000):
+            print(json.dumps({"error": "--cny must be a number above 0"}))
+            return 2
+        try:
+            row = led.append("spend", cny=round(a.cny, 2), actor=a.by, note=a.note[:200], external=True)
+        except OSError as e:
+            print(json.dumps({"error": f"the ledger cannot be written ({e.strerror})"}))
+            return 1
+        print(json.dumps({"recorded": row["cny"], "by": a.by, "at": row["at"], "spent_today_cny": round(quota.run_spend_today(led.rows(), _t.time()), 2)}, ensure_ascii=False))
+        return 0
+    rows = led.rows()
+    start = quota.day_start(_t.time())
+    print(json.dumps({"spent_today_cny": round(quota.run_spend_today(rows, _t.time()), 2), "outside_the_package": [r for r in rows if r.get("action") == "spend" and float(r.get("ts") or 0) >= start],
+                      "note": "hours run from the ledger's own power-on/create lines (to each cap), plus what was recorded by `ledger add`; the vendor's console is the real bill"}, ensure_ascii=False))
+    return 0
+
+
 def quota_cmd(a) -> int:
     import os
     from . import quota
@@ -376,6 +417,13 @@ def main(argv: list[str] | None = None) -> int:
     q.add_argument("id")
     q.add_argument("--minutes", type=float, required=True)
     q.add_argument("--agent", action="store_true", help="an agent's call: only a box this agent created")
+    lg = sub.add_parser("ledger", help="the ledger of what the package powered, created and released: today (hours run and CNY, free), add (a person records a spend made outside the package)")
+    lsub = lg.add_subparsers(dest="lcmd", required=True)
+    lsub.add_parser("today")
+    la = lsub.add_parser("add")
+    la.add_argument("--cny", type=float, required=True, help="CNY spent today outside the package (the vendor's console, a hand-run script); counts against --budget-cny")
+    la.add_argument("--by", required=True, help="who records it (kept with the time)")
+    la.add_argument("--note", default="", help="what it was (free text)")
     qs = sub.add_parser("quota", help="the allowance an agent may rent boxes inside: show (free), set (a person; records who and when)")
     qsub = qs.add_subparsers(dest="qcmd", required=True)
     qsub.add_parser("show")
@@ -407,6 +455,8 @@ def main(argv: list[str] | None = None) -> int:
         return instances(a)
     if a.cmd == "quota":
         return quota_cmd(a)
+    if a.cmd == "ledger":
+        return ledger_cmd(a)
     if a.cmd == "status":
         from . import config
         from .status import status

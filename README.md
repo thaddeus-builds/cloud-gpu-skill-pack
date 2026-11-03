@@ -35,7 +35,7 @@ box.ensure_up()                     # tunnel by key, power on if off (by design,
 api, token = box.api_base(), box.token()
 ```
 
-Use it from another project by installing it (`pip install git+https://github.com/thaddeus-builds/cloud-gpu-skill-pack.git`) or by vendoring the `cloudgpu/` folder as a plain copy
+Use it from another project by installing it (`uv tool install git+https://github.com/thaddeus-builds/cloud-gpu-skill-pack.git` (a command), or `uv add git+https://github.com/thaddeus-builds/cloud-gpu-skill-pack.git` (a library)) or by vendoring the `cloudgpu/` folder as a plain copy
 (never edit the copy: fix it here and take it again). The first consumer is [adcut-skill-pack](https://git.coco.xyz/ming.liu/adcut-skill-pack) (its `h3host` avatar provider).
 
 Measured 2026-10-23: a 4090 48G (¥2.88/h) makes a second of 480p video for about ¥0.005 to 0.007, a PRO 6000 (¥6.98/h) for about ¥0.014 to 0.016, hosted is ¥0.03 to 0.04; at 768p the

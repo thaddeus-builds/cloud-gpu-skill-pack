@@ -285,5 +285,88 @@ def test_install_sh_wires_the_voice_in_when_it_finds_one_and_says_voice_false_wh
                     pass
 
 
+SHA = "c" * 40
+
+
+def make_pack(root: Path, name="comfyui-vrgamedevgirl", sha=SHA):
+    pack = root / "custom_nodes" / name
+    (pack / ".git").mkdir(parents=True)
+    (pack / ".git" / "HEAD").write_text(sha + "\n")
+    return pack
+
+
+def test_the_third_party_node_pack_is_reported_with_its_commit_and_is_never_a_missing_model():
+    with _t.tmpdir() as d:
+        root = tree(Path(d) / "comfy", L4090)
+        n = dm.find_nodes(root)["audiodrive"]
+        assert n["present"] is False and n["commit"] is None and n["disabled"] is False and n["node"] == "VRGDG_MiniMaxH3AudioDrive", n
+        make_pack(root, "ComfyUI-VRGameDevGirl")                                    # the folder is named like the repository, in any case
+        n = dm.find_nodes(root)["audiodrive"]
+        assert n["present"] is True and n["commit"] == SHA and n["folder"] == "ComfyUI-VRGameDevGirl" and "CLOUDGPU_ALLOW_NODE_VRGDG=1" in n["note"], n
+        rep = dm.detect(root, 8.9)
+        assert rep["missing"] == [], "a node pack is a report, never a missing model"
+        r = subprocess.run([sys.executable, str(Path(_t.ROOT) / "cloudgpu" / "detect_models.py"), "--comfy-root", str(root), "--compute-cap", "8.9"], capture_output=True, text=True)
+        assert r.returncode == 0 and json.loads(r.stdout)["nodes"]["audiodrive"]["commit"] == SHA, r.stdout
+        r = subprocess.run([sys.executable, str(Path(_t.ROOT) / "cloudgpu" / "detect_models.py"), "--comfy-root", str(root), "--nodes-only", "--text"], capture_output=True, text=True)
+        assert r.returncode == 0 and f"is installed (commit {SHA})" in r.stdout and "MiniMaxH3AddGuide" in r.stdout and "licence-restricted" in r.stdout, r.stdout
+    with _t.tmpdir() as d:
+        root = Path(d) / "comfy"
+        make_pack(root, "comfyui-vrgamedevgirl.disabled")                           # ComfyUI-Manager's way of switching a pack off
+        n = dm.find_nodes(root)["audiodrive"]
+        assert n["present"] is False and n["disabled"] is True and "a disabled copy" in dm.nodes_text(dm.find_nodes(root))
+        assert dm.find_nodes(Path(d) / "no-such-comfy")["audiodrive"]["present"] is False
+
+
+def test_install_sh_reports_the_node_pack_installs_nothing_and_leaves_the_third_party_lock_off_unless_the_owner_set_the_switch():
+    if not Path("/bin/sh").exists():
+        return _t.skip("no sh")
+    with _t.tmpdir() as d:
+        home = Path(d) / "home"
+        tree(home / "ComfyUI", L4090)
+        make_pack(home / "ComfyUI")
+        work = Path(d) / "box"
+        work.mkdir()
+        for f in ("onbox/install.sh", "detect_models.py", "onbox/models.4090.json", "adapter.py"):
+            (work / Path(f).name).write_bytes((Path(_t.ROOT) / "cloudgpu" / f).read_bytes())
+        port = free_port()
+        env = {"PATH": os.environ["PATH"], "HOME": str(home), "CLOUDGPU_PYTHON": sys.executable}
+        box = home / "h3host"
+
+        def health():
+            for _ in range(30):
+                try:
+                    return json.loads(urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=3).read())
+                except OSError:
+                    time.sleep(0.3)
+            raise AssertionError("the adapter did not answer")
+
+        try:
+            before = sorted(p.name for p in (home / "ComfyUI" / "custom_nodes").iterdir())
+            r = subprocess.run(["sh", str(work / "install.sh"), "auto", str(port)], input="t" * 32, env=env, capture_output=True, text=True, timeout=120)
+            assert r.returncode == 0 and f"is installed (commit {SHA})" in r.stdout and "audio lock: the official lock" in r.stdout, (r.stdout, r.stderr)
+            assert "is written into start.sh" not in r.stdout
+            assert sorted(p.name for p in (home / "ComfyUI" / "custom_nodes").iterdir()) == before, "install.sh installs and fetches no node"
+            start = (box / "start.sh").read_text()
+            assert 'CLOUDGPU_ALLOW_NODE_VRGDG="${CLOUDGPU_ALLOW_NODE_VRGDG:-}"' in start, start          # no default but the environment of whoever runs start.sh
+            h = health()
+            assert h["audio_lock_detail"]["audiodrive"]["allowed"] is False and "audiodrive" not in h["audio_lock"], h
+            subprocess.run(["pkill", "-f", f"{box}/server.py"])
+            time.sleep(0.5)
+            r = subprocess.run(["sh", str(work / "install.sh"), "auto", str(port)], input="t" * 32, env={**env, "CLOUDGPU_ALLOW_NODE_VRGDG": "1"}, capture_output=True, text=True, timeout=120)
+            assert r.returncode == 0 and "CLOUDGPU_ALLOW_NODE_VRGDG=1 is written into start.sh" in r.stdout, (r.stdout, r.stderr)
+            assert health()["audio_lock_detail"]["audiodrive"]["allowed"] is True
+            assert "ENABLED" in (box / "server.log").read_text()
+            subprocess.run(["pkill", "-f", f"{box}/server.py"])
+            time.sleep(0.5)
+            subprocess.run(["sh", str(work / "install.sh"), "auto", str(port)], input="t" * 32, env=env, capture_output=True, text=True, timeout=120)
+            assert health()["audio_lock_detail"]["audiodrive"]["allowed"] is False, "a reinstall without the switch is off again: the decision is made at each install"
+        finally:
+            for pid in subprocess.run(["pgrep", "-f", f"{home}/h3host/server.py"], capture_output=True, text=True).stdout.split():
+                try:
+                    os.kill(int(pid), signal.SIGTERM)
+                except OSError:
+                    pass
+
+
 if __name__ == "__main__":
     _t.main(globals())

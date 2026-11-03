@@ -1,4 +1,4 @@
-"""cloudgpu.vendors and `python3 -m cloudgpu instances`, offline: the autodl vendor against the documented answers (autodl.art/docs/app_api): the list, one instance, the status,
+"""cloudgpu.vendors and `openmax-cloudgpu instances`, offline: the autodl vendor against the documented answers (autodl.art/docs/app_api): the list, one instance, the status,
 the snapshot WITHOUT its password and token, the create request checked against the documented limits; and the CLI's rule: reading is free, everything that changes the
 account (power, create, release) is a dry run until `--yes`, and release refuses an instance that is not shut down. A vendor taken in later gets a power backend for free."""
 

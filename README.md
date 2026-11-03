@@ -16,13 +16,16 @@ tests/              python3 tests/run.py (offline: a fake ComfyUI stands in for 
 ```
 
 ```
-python3 -m cloudgpu status          # where the box stands, read only
-python3 -m cloudgpu util --since 2h  # how much each box works, from its task records, read only
-python3 -m cloudgpu instances list  # the cloud account (autodl): list, status, snapshot; power, create, release only with --yes
-python3 -m cloudgpu quota show      # the allowance an agent may rent boxes inside (0 until a person sets it); instances ensure --count N
-python3 -m cloudgpu hold BOX --minutes 60 --who NAME   # keep takes off a box for a while (release BOX ends it)
-python3 -m cloudgpu bundle          # cloudgpu-box.tgz: what to copy onto a box
-python3 -m cloudgpu price --box rtx4090 --format tsv
+# uv tool install . (from a checkout; the fleet uses uv, R18) puts openmax-cloudgpu (the playbook's name, R19) and its short form cloudgpu on the PATH; update: uv tool install --reinstall .
+# without installing: uv run --no-project python -m cloudgpu ... (or python3 -m cloudgpu)
+openmax-cloudgpu status          # where the box stands, read only
+openmax-cloudgpu util --since 2h  # how much each box works, from its task records, read only
+openmax-cloudgpu instances list  # the cloud account (autodl): list, status, snapshot; power, create, release only with --yes
+openmax-cloudgpu instances power-on ID --yes --max-minutes 21 --budget-cny 5   # a hard stop (a guard shuts it down and checks) and a day's budget gate
+openmax-cloudgpu quota show      # the allowance an agent may rent boxes inside (0 until a person sets it); instances ensure --count N
+openmax-cloudgpu hold BOX --minutes 60 --who NAME   # keep takes off a box for a while (release BOX ends it)
+openmax-cloudgpu bundle          # cloudgpu-box.tgz: what to copy onto a box
+openmax-cloudgpu price --box rtx4090 --format tsv
 ```
 
 ```python
@@ -32,7 +35,7 @@ box.ensure_up()                     # tunnel by key, power on if off (by design,
 api, token = box.api_base(), box.token()
 ```
 
-Use it from another project by installing it (`pip install git+https://github.com/thaddeus-builds/cloud-gpu-skill-pack.git`) or by vendoring the `cloudgpu/` folder as a plain copy
+Use it from another project by installing it (`uv tool install git+https://github.com/thaddeus-builds/cloud-gpu-skill-pack.git` (a command), or `uv add git+https://github.com/thaddeus-builds/cloud-gpu-skill-pack.git` (a library)) or by vendoring the `cloudgpu/` folder as a plain copy
 (never edit the copy: fix it here and take it again). The first consumer is [adcut-skill-pack](https://git.coco.xyz/ming.liu/adcut-skill-pack) (its `h3host` avatar provider).
 
 Measured 2026-10-23: a 4090 48G (¥2.88/h) makes a second of 480p video for about ¥0.005 to 0.007, a PRO 6000 (¥6.98/h) for about ¥0.014 to 0.016, hosted is ¥0.03 to 0.04; at 768p the

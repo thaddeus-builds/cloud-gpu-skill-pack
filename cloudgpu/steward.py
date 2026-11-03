@@ -1,8 +1,8 @@
 """An agent managing its own boxes inside the allowance a person set (quota.py): create and release with the checks, and `ensure`, the verb "have N boxes up".
 
-    python3 -m cloudgpu instances create --agent --yes --spec request.json           # inside the allowance, else refused with the reason
-    python3 -m cloudgpu instances release --agent --yes ID                           # only an instance the ledger shows this agent created, shut down, not in a pool
-    python3 -m cloudgpu instances ensure --count 2 --spec template.json --yes        # power on what is off, create what is missing, say what could not be had
+    openmax-cloudgpu instances create --agent --yes --spec request.json           # inside the allowance, else refused with the reason
+    openmax-cloudgpu instances release --agent --yes ID                           # only an instance the ledger shows this agent created, shut down, not in a pool
+    openmax-cloudgpu instances ensure --count 2 --spec template.json --yes        # power on what is off, create what is missing, say what could not be had
 
 Everything is the vendor's account API (vendors/); nothing here talks to a box. Every create, release and power-on is a line in the ledger. A person's own `--yes` without `--agent` is as before
 (no allowance asked) but is ledgered too, and an instance a person made is never released by the agent.
@@ -86,12 +86,12 @@ class Steward:
         q = self.quota
         if not q.allows_create:
             raise CloudGpuError("over_quota", "the agent may not create boxes: the allowance is 0" + (f" ({q.problem})" if q.problem else ""),
-                                ["a person sets it: python3 -m cloudgpu quota set --by NAME --max-instances N --max-cny-per-day CNY --price SPEC=CNY_PER_HOUR"])
+                                ["a person sets it: openmax-cloudgpu quota set --by NAME --max-instances N --max-cny-per-day CNY --price SPEC=CNY_PER_HOUR"])
         sp = spec.get("gpu_spec_uuid")
         price = q.prices.get(sp)
         if not price:
             raise CloudGpuError("over_quota", f"the allowance has no price for card spec {sp!r}, so what it would spend is not known",
-                                [f"a person adds it: python3 -m cloudgpu quota set ... --price {sp}=CNY_PER_HOUR"])
+                                [f"a person adds it: openmax-cloudgpu quota set ... --price {sp}=CNY_PER_HOUR"])
         pending = self.ledger.unresolved()
         if len(mine) + len(pending) + 1 > q.max_instances:
             raise CloudGpuError("over_quota", f"the allowance is {q.max_instances} instance(s) at once and the agent already has {len(mine)}"
@@ -154,6 +154,41 @@ class Steward:
             out["warning"] = f"the real price {price} is above the {assumed} the allowance assumed: a person should raise it"
         return out
 
+    # ---- the budget gate ----
+    def price_of(self, instance_id: str, gpu_spec: str | None = None) -> float | None:
+        """CNY per hour: the account's snapshot says, else the allowance's assumed price for the card spec, else None."""
+        try:
+            p = (self.vendor.snapshot(instance_id) or {}).get("price_cny_per_hour")
+        except CloudGpuError:
+            p = None
+        return float(p) if p else (self.quota.prices.get(gpu_spec) if gpu_spec else None)
+
+    def gate(self, price: float | None, minutes: float | None, budget: float | None, what: str) -> dict:
+        """The budget gate (`--budget-cny`): refuse when the hours the ledger shows run today (`quota.run_spend_today`), plus this run at its price for `minutes`, are above `budget`.
+        CloudGpuError(over_budget) saying the numbers. Returns {spent_today_cny, would_add_cny, budget_cny}, {} when no budget is asked."""
+        if budget is None:
+            return {}
+        if not minutes:
+            raise CloudGpuError("over_budget", "--budget-cny needs --max-minutes: the gate must know how long the box would run", ["add --max-minutes N"])
+        if not price:
+            raise CloudGpuError("over_budget", f"{what}: its price per hour is not known, so the budget gate cannot count it",
+                                ["a person adds a card price: quota set --price SPEC=CNY_PER_HOUR"])
+        spent, add = quota.run_spend_today(self.ledger.rows(), self.now()), price * minutes / 60
+        if spent + add > budget + 1e-9:
+            raise CloudGpuError("over_budget", f"today's runs cost about CNY {spent:.2f}; {what} for {minutes:g} minutes at {price:g}/h adds {add:.2f}; the budget is {budget:g}",
+                                ["wait for tomorrow, or a person raises --budget-cny"])
+        return {"spent_today_cny": round(spent, 2), "would_add_cny": round(add, 2), "budget_cny": budget}
+
+    def note_run(self, instance_id: str, minutes: float | None, price: float | None = None, *, power_on: bool = True) -> None:
+        """The ledger lines the gate counts hours from: `power-on` with the price (a create already has its own line) and, when a hard cap is asked, a `deadline` the run is set aside to."""
+        try:
+            if power_on:
+                self._log("power-on", instance=instance_id, **({"price_cny_per_hour": price} if price else {}))
+            if minutes:
+                self._log("deadline", instance=instance_id, until=round(self.now() + minutes * 60, 1), minutes=minutes)
+        except OSError:
+            pass
+
     # ---- release ----
     def check_release(self, instance_id: str, listing) -> None:
         """For the agent: only an instance the ledger shows it created, still listed, and not wired to a box in the settings. CloudGpuError(not_allowed) otherwise."""
@@ -193,17 +228,20 @@ class Steward:
         return free
 
     def ensure(self, count: int, template: dict, *, specs=None, centers=None, yes: bool = False, patience: float = PATIENCE_S, delays=BACKOFF_S, poll: float = POLL_S,
-               boot_wait: float = BOOT_WAIT_S) -> dict:
+               boot_wait: float = BOOT_WAIT_S,
+               instances=None, max_minutes: float | None = None, budget: float | None = None) -> dict:
         """Have `count` of the boxes this setup knows (the ledger's, and the ones wired in the settings) running. Order: instances already running count; then those that are off and
         billed by the hour, or a pass that has not ended, are powered on (a pass that has ended is a person's to renew); then, inside the allowance, new ones are created from `template` for each card spec in `specs`,
         in order, at each data center in `centers`, in order (the order IS the preference). Where the vendor shows its free cards, the page is read first and a create is made only for a spec and place that shows a free card,
         in order, the moment one does: nothing is asked of a card that is not there, and when none is free the page is read again every `poll` seconds (at most `patience` seconds in all). A vendor with
-        no such page, or one that cannot be read, is tried blind and again after the pauses `delays`. Every failure that is not stock is reported once and not retried. Without `yes` nothing is changed: the plan is returned. The result says how many are up, how many are missing, and each failure's reason."""
+        no such page, or one that cannot be read, is tried blind and again after the pauses `delays`. Every failure that is not stock is reported once and not retried. `instances` names more instances of the account to count and power on first (a box a person rents and keeps, neither wired in the settings nor made by this ledger).
+        `budget` (CNY, needs `max_minutes`, the hard cap the CLI arms after this call) refuses a power-on or create that would take today's hours run above it. Without `yes` nothing is changed: the plan is returned. The result says how many are up, how many are missing, and each failure's reason."""
         specs = list(specs or DEFAULT_SPECS)
         centers = list(centers or [])
         listing = self.vendor.all()
         mine = self.sync(listing)
-        known = pool_instances(self.env) | set(mine)
+        named = [x for x in dict.fromkeys(instances or []) if x]
+        known = pool_instances(self.env) | set(mine) | set(named)
         have = [i for i in listing if i.id in known]
         running = [i.id for i in have if i.status == "running"]
         off = [i for i in have if i.status in OFF_STATUS]
@@ -215,8 +253,10 @@ class Steward:
         unclear = [{"id": i.id, "status": i.status} for i in have if i.status != "running" and i.status not in OFF_STATUS]
         need = max(0, count - len(running))
         combos = [(s, c) for s in specs for c in (centers or [None])]
-        out: dict = {"wanted": count, "running": running, "powered_on": [], "created": [], "failures": [], "unclear": unclear, "passes": prows}
-        notes: list[str] = [r["message"] for r in expiry.alerts(prows) if r["id"] not in pass_off and r["state"] != "off"]      # a pass that ends soon, running or not
+        out: dict = {"wanted": count, "running": running, "powered_on": [], "created": [], "runs": {}, "failures": [], "unclear": unclear, "passes": prows}
+        out["not_in_account"] = [x for x in named if x not in {i.id for i in listing}]
+        notes: list[str] = [f"{x} is named but the account does not list it" for x in out["not_in_account"]]
+        notes += [r["message"] for r in expiry.alerts(prows) if r["id"] not in pass_off and r["state"] != "off"]      # a pass that ends soon, running or not
         notes += [by_id[i]["message"] if i in by_id else f"{i} is off and billed as a pass (not by the hour): a person looks at it in the vendor's console" for i in pass_off]
         if unclear:
             notes.append("an instance in a state this package does not know is neither counted nor touched: look at it with `instances snapshot ID`")
@@ -224,15 +264,30 @@ class Steward:
             plan: dict = {"dry_run": True, "would_power_on": [i.id for i in power_cands[:need]]}
             short = need - len(plan["would_power_on"])
             plan["would_create"] = short
-            if short > 0:
+            if max_minutes:
+                plan["would_guard"] = f"shut each box it turns on down after {max_minutes:g} minutes and confirm"
+            if budget is not None:
+                checks = {}
+                for i in power_cands[:need]:                                   # the numbers, so a person sees a refusal before `--yes`
+                    price = self.price_of(i.id, i.gpu_spec) if i.billing == "payg" else None
+                    try:
+                        checks[i.id] = {"price_cny_per_hour": price, **(self.gate(price, max_minutes, budget, f"powering on {i.id}") if i.billing == "payg" else {})}
+                    except CloudGpuError as e:
+                        checks[i.id] = {"price_cny_per_hour": price, "would_refuse": e.message}
+                plan["budget_checks"] = checks
+            if short > 0 or plan["would_power_on"]:
                 free = self._market(combos)
+                if not short > 0:
+                    plan["if_a_power_on_is_refused_for_no_stock"] = "a new box is created in this order, inside the allowance"
                 plan["order"] = [{"gpu_spec_uuid": s, "data_center": c, **({"free": free[(s, c)]} if free and (s, c) in free else {})} for s, c in combos]
                 try:
                     self.check_create({**template, "gpu_spec_uuid": specs[0]}, mine)
                     plan["allowance"] = "covers one more"
                 except CloudGpuError as e:
                     plan["allowance"] = e.message
-            return {**out, **plan, "missing": short if short > 0 else 0, "next": ["pass --yes to do it"] + notes}
+            refused = [i for i, c in plan.get("budget_checks", {}).items() if "would_refuse" in c]
+            go = ["the budget gate would refuse " + ", ".join(refused) + (" (and nothing else is left to open)" if len(refused) == len(plan["would_power_on"]) else "") + ": --yes will not open it; wait for tomorrow, or raise --budget-cny"] if refused else []
+            return {**out, **plan, "missing": short if short > 0 else 0, "next": (go or ["pass --yes to do it"]) + notes}
         fails: dict[tuple, dict] = {}
 
         def fail(what: str, where: str, e: CloudGpuError) -> None:
@@ -247,8 +302,14 @@ class Steward:
                 if need <= 0:
                     break
                 try:
+                    price = self.price_of(i.id, i.gpu_spec) if i.billing == "payg" else None
+                    gate = self.gate(price, max_minutes, budget, f"powering on {i.id}") if i.billing == "payg" else {}
                     self.vendor.power_on(i.id, START_COMMAND)
                 except CloudGpuError as e:
+                    if e.kind == "over_budget":
+                        pending.clear()                     # the day's money is the same for every box
+                        fail("power-on", i.id, e)
+                        break
                     if self.vendor.is_no_stock(e):
                         e = CloudGpuError("no_stock", f"no free card to power {i.id} on now", status=e.status, detail=e.detail)
                         stock_miss = True
@@ -257,8 +318,9 @@ class Steward:
                     fail("power-on", i.id, e)
                     continue
                 pending.remove(i)
-                self._log("power-on", instance=i.id)
+                self.note_run(i.id, max_minutes if i.billing == "payg" else None, price)
                 out["powered_on"].append(i.id)
+                out["runs"][i.id] = {"price_cny_per_hour": price, **gate}
                 need -= 1
             for s, c in combos if creating else []:
                 if (s, c) in dead:
@@ -271,6 +333,7 @@ class Steward:
                     spec = {**template, "gpu_spec_uuid": s, **({"data_center_list": [c]} if c else {})}
                     spec.setdefault("start_command", START_COMMAND)
                     try:
+                        gate = self.gate(self.quota.prices.get(s), max_minutes, budget, f"creating a {s}")
                         r = self.create(spec, listing=listing)
                     except CloudGpuError as e:
                         fail("create", f"{s}@{c or 'any'}", e)
@@ -278,10 +341,12 @@ class Steward:
                             stock_miss = True
                         else:
                             dead.add((s, c))                # refused for a reason waiting does not change: not tried again
-                        if e.kind in ("over_quota", "key_missing"):
+                        if e.kind in ("over_quota", "key_missing", "over_budget"):
                             creating = False                # the allowance, or a request the vendor refuses outright, is the same for every spec and place
                         break
                     out["created"].append(r)
+                    self.note_run(r["created"], max_minutes, power_on=False)
+                    out["runs"][r["created"]] = {"price_cny_per_hour": r.get("price_cny_per_hour"), **gate}
                     listing = self.vendor.all()
                     need -= 1
                 if not creating or need <= 0:
@@ -334,13 +399,15 @@ class Steward:
         nxt = []
         if out["created"]:
             nxt.append("a new instance carries only the image: the adapter and the voice service are set up on it (docs/cloud-gpu.md, 'A new box: what is automatic and what is not') "
-                       "before it takes a take; then wire it in the settings (CLOUDGPU_<NAME>_INSTANCE, _SSH, _BASE, _TOKEN) and run `python3 -m cloudgpu status`")
+                       "before it takes a take; then wire it in the settings (CLOUDGPU_<NAME>_INSTANCE, _SSH, _BASE, _TOKEN) and run `openmax-cloudgpu status`")
         if out["missing"]:
             kinds = {f["kind"] for f in out["failures"]}
             if "no_stock" in kinds:
                 nxt.append(f"{out['missing']} short: the vendor had no free card at the places and specs tried; run `ensure` again later, add another spec or data center, or a person rents one")
+            if "over_budget" in kinds:
+                nxt.append("the budget gate stopped further boxes today: a person raises --budget-cny, or it waits for tomorrow")
             if "over_quota" in kinds:
                 nxt.append("the allowance stopped further creation: a person raises it (quota set) or releases an instance the agent made")
-            if kinds - {"no_stock", "over_quota"}:
+            if kinds - {"no_stock", "over_quota", "over_budget"}:
                 nxt.append("some failures are not stock: read their reasons; retrying will not change them")
         return nxt

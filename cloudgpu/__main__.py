@@ -1,4 +1,4 @@
-"""python3 -m cloudgpu COMMAND: status and util (read only), hold / release (a person's hold on a box), instances (the cloud account: list, status, snapshot, expiry read; power, create, release only with --yes), price, bench (a paid take), bundle (what to copy onto a box)."""
+"""openmax-cloudgpu COMMAND: status and util (read only), hold / release (a person's hold on a box), instances (the cloud account: list, status, snapshot, expiry read; power, create, release only with --yes), price, bench (a paid take), bundle (what to copy onto a box)."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import json
 import os
 import sys
 import tarfile
+import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -84,18 +85,57 @@ def instances(a, out=print) -> int:
             if c == "power-on" and getattr(a, "max_minutes", None) is not None:
                 from . import guard
                 cap = guard.minutes_ok(a.max_minutes)
-            if not a.yes:
-                out(json.dumps({"dry_run": True, "would": c, "id": a.id, **({"would_guard": f"shut it down after {cap:g} minutes and confirm"} if cap else {}), "next": [f"pass --yes (a person does) to {c}" + (": it starts the hourly billing" if c == "power-on" else "")]}))
+            budget = getattr(a, "budget_cny", None)
+            if budget is not None and (budget <= 0 or not cap):
+                out(json.dumps({"error": "--budget-cny must be above 0 and needs --max-minutes: the gate must know how long the box would run"}))
+                return 2
+            if not a.yes and c == "power-on" and budget is not None:
+                st = _steward(v, a)                                                 # the numbers, so a person sees the refusal before `--yes`
+                try:
+                    inst = v.get(a.id)
+                except CloudGpuError:
+                    inst = None
+                price = st.price_of(a.id, inst.gpu_spec if inst else None)
+                try:
+                    gate = st.gate(price, cap, budget, f"powering on {a.id}")
+                except CloudGpuError as e:
+                    if e.kind != "over_budget":
+                        raise
+                    gate = {"would_refuse": e.message}
+                out(json.dumps({"dry_run": True, "would": c, "id": a.id, "price_cny_per_hour": price, "would_guard": f"shut it down after {cap:g} minutes and confirm", **gate,
+                                "next": ["pass --yes (a person does) to power-on: it starts the hourly billing" if "would_refuse" not in gate else "the budget gate would refuse this: wait for tomorrow, or raise --budget-cny"]}, ensure_ascii=False))
                 return 0
-            v.power_on(a.id) if c == "power-on" else v.power_off(a.id)
+            if not a.yes:
+                out(json.dumps({"dry_run": True, "would": c, "id": a.id, **({"would_budget": f"refuse unless today's hours run plus {cap:g} minutes stay within CNY {budget:g}"} if budget else {}), **({"would_guard": f"shut it down after {cap:g} minutes and confirm"} if cap else {}), "next": [f"pass --yes (a person does) to {c}" + (": it starts the hourly billing" if c == "power-on" else "")]}))
+                return 0
             st, done = _steward(v, a), {"done": c, "id": a.id}
-            try:
-                st.ledger.append(c, vendor=v.name, instance=a.id, actor=st.actor, agent=bool(a.agent))
-            except OSError:
-                done["ledger"] = "not written"
-            if cap:
-                done["guard"] = _spawn_guard(v, a.id, cap, bool(a.agent))
-            out(json.dumps(done))
+            if c == "power-on":
+                try:
+                    inst = v.get(a.id) if (cap or budget is not None) else None
+                except CloudGpuError:
+                    inst = None                                                    # a vendor with no listing: treated as billed by the hour
+                payg = inst is None or inst.billing == "payg"                      # a pass costs nothing more when it is on: no gate, no cap
+                price = st.price_of(a.id, inst.gpu_spec if inst else None) if (payg and (cap or budget is not None)) else None
+                gate = st.gate(price, cap, budget, f"powering on {a.id}") if payg else {}
+                v.power_on(a.id)
+                done.update(started_at=time.strftime("%Y-%m-%dT%H:%M:%S%z"), price_cny_per_hour=price, **gate)
+                try:
+                    st.ledger.append(c, vendor=v.name, instance=a.id, actor=st.actor, agent=bool(a.agent), **({"price_cny_per_hour": price} if price else {}))
+                except OSError:
+                    done["ledger"] = "not written"
+                if cap and payg:
+                    st.note_run(a.id, cap, power_on=False)
+                    g = done["guard"] = _spawn_guard(v, a.id, cap, bool(a.agent) and a.id in st.ledger.created(v.name))      # --agent only for a box this agent made: the guard refuses any other
+                    done["auto_off_at"], done["max_minutes"] = g["off_at"], cap
+                elif cap:
+                    done["guard"] = f"not started: {a.id} is billed as a pass ({inst.billing}), switching it off saves nothing"
+            else:
+                v.power_off(a.id)
+                try:
+                    st.ledger.append(c, vendor=v.name, instance=a.id, actor=st.actor, agent=bool(a.agent))
+                except OSError:
+                    done["ledger"] = "not written"
+            out(json.dumps(done, ensure_ascii=False))
         elif c == "create":
             spec = json.loads(sys.stdin.read() if a.spec == "-" else Path(a.spec).read_text())
             problems = v.create_problems(spec)
@@ -113,7 +153,7 @@ def instances(a, out=print) -> int:
                 out(json.dumps({"dry_run": True, "would": "create", "request": spec, **({"allowance": verdict} if a.agent else {}),
                                 "next": ["pass --yes to create: it STARTS BILLING at once" + (" (inside the allowance)" if a.agent else " (a person does)")]}, ensure_ascii=False))
                 return 0
-            out(json.dumps({**st.create(spec), "next": ["python3 -m cloudgpu instances snapshot ID for the price and the SSH door"]}, ensure_ascii=False))
+            out(json.dumps({**st.create(spec), "next": ["openmax-cloudgpu instances snapshot ID for the price and the SSH door"]}, ensure_ascii=False))
         elif c == "release":
             st = v.status(a.id)
             if st != "shutdown":
@@ -131,7 +171,7 @@ def instances(a, out=print) -> int:
         return 1
 
 
-def _spawn_guard(v, instance_id: str, minutes: float, agent: bool) -> dict:
+def _spawn_guard(v, instance_id: str, minutes: float, agent: bool = False) -> dict:
     """Start `instances guard` in the background for `instance_id`; its output goes to a log in the state directory. The result says when it will shut the box and where it writes."""
     import subprocess
     from . import guard, hold
@@ -159,6 +199,11 @@ def guard_cmd(a, v, out) -> int:
         except OSError:
             pass
     r = guard.run(v, a.id, minutes, on_off=note)
+    if not r["off"]:
+        try:
+            st.ledger.append("guard-failed", vendor=v.name, instance=a.id, actor="guard", reason="; ".join(r.get("errors") or [])[:160] or f"status {r.get('status')}")      # the budget gate counts it as still running
+        except OSError:
+            pass
     out(json.dumps(r, ensure_ascii=False))
     return 0 if r["off"] else 1
 
@@ -208,6 +253,7 @@ def _steward(v, a):
 def ensure_cmd(a, v, out) -> int:
     """`instances ensure --count N --spec TEMPLATE`: up to N of the boxes this setup knows running, powered on or created inside the allowance; the report says how many and why not."""
     import os
+    from .errors import CloudGpuError
     from . import config
     from .steward import DEFAULT_CENTERS, DEFAULT_SPECS, Steward, csv
     template = json.loads(sys.stdin.read() if a.spec == "-" else Path(a.spec).read_text())
@@ -221,16 +267,53 @@ def ensure_cmd(a, v, out) -> int:
         if problems:
             out(json.dumps({"error": "the request is not one the vendor takes", "problems": problems}, ensure_ascii=False))
             return 2
-    st = Steward(v, os.environ, agent=True)
-    r = st.ensure(a.count, template, specs=specs, centers=centers, yes=a.yes, patience=a.patience, poll=a.poll)
     cap = getattr(a, "max_minutes", None)
-    if cap is not None and a.yes:
+    if cap is not None:
         from . import guard
         cap = guard.minutes_ok(cap)
+    if a.budget_cny is not None and (a.budget_cny <= 0 or not cap):
+        out(json.dumps({"error": "--budget-cny must be above 0 and needs --max-minutes: the gate must know how long the boxes would run"}))
+        return 2
+    named = csv(",".join(a.instance) or config.get("ENSURE_INSTANCES"), ())
+    st = Steward(v, os.environ, agent=True)
+    r = st.ensure(a.count, template, specs=specs, centers=centers, yes=a.yes, patience=a.patience, poll=a.poll, instances=named, max_minutes=cap, budget=a.budget_cny)
+    if cap is not None and a.yes:
         ids = list(r.get("powered_on") or []) + [c["created"] for c in r.get("created") or []]
-        r["guards"] = {i: _spawn_guard(v, i, cap, True) for i in ids}
+        try:
+            pass_ids = {i.id for i in v.all() if i.id in ids and i.billing != "payg"}
+        except CloudGpuError:
+            pass_ids = set()                                                                       # a pass is not capped (switching it off saves nothing)
+        made = st.ledger.created(v.name)
+        r["guards"] = {i: _spawn_guard(v, i, cap, i in made) for i in ids if i not in pass_ids}
+        for i, g in r["guards"].items():
+            r["runs"].setdefault(i, {}).update(auto_off_at=g["off_at"], max_minutes=cap)
     out(json.dumps(r, ensure_ascii=False))
     return 0 if not r["missing"] else 1
+
+
+def ledger_cmd(a) -> int:
+    """`ledger today`: the CNY the gate counts as spent today and the rows behind it. `ledger add --cny X --by NAME`: a spend made outside the package, so `--budget-cny` counts it too."""
+    import math
+    import os
+    import time as _t
+    from . import quota
+    led = quota.Ledger(quota.ledger_path(os.environ))
+    if a.lcmd == "add":
+        if not (math.isfinite(a.cny) and 0 < a.cny <= 100000):
+            print(json.dumps({"error": "--cny must be a number above 0"}))
+            return 2
+        try:
+            row = led.append("spend", cny=round(a.cny, 2), actor=a.by, note=a.note[:200], external=True)
+        except OSError as e:
+            print(json.dumps({"error": f"the ledger cannot be written ({e.strerror})"}))
+            return 1
+        print(json.dumps({"recorded": row["cny"], "by": a.by, "at": row["at"], "spent_today_cny": round(quota.run_spend_today(led.rows(), _t.time()), 2)}, ensure_ascii=False))
+        return 0
+    rows = led.rows()
+    start = quota.day_start(_t.time())
+    print(json.dumps({"spent_today_cny": round(quota.run_spend_today(rows, _t.time()), 2), "outside_the_package": [r for r in rows if r.get("action") == "spend" and float(r.get("ts") or 0) >= start],
+                      "note": "hours run from the ledger's own power-on/create lines (to each cap), plus what was recorded by `ledger add`; the vendor's console is the real bill"}, ensure_ascii=False))
+    return 0
 
 
 def quota_cmd(a) -> int:
@@ -285,7 +368,7 @@ def _quota_view(env) -> dict:
 
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
-    ap = argparse.ArgumentParser(prog="python3 -m cloudgpu", description=__doc__)
+    ap = argparse.ArgumentParser(prog="openmax-cloudgpu", description=__doc__)
     sub = ap.add_subparsers(dest="cmd", required=True)
     st = sub.add_parser("status", help="where the box stands (read only)")
     st.add_argument("--env-file", help="read the settings from this KEY=value file instead of the environment (it warns when other users can read it)")
@@ -314,6 +397,7 @@ def main(argv: list[str] | None = None) -> int:
             q.add_argument("--agent", action="store_true", help="an agent's call: release only touches an instance this agent created (ledger)")
         if c == "power-on":
             q.add_argument("--max-minutes", type=float, help="a hard cap: after the power-on, a background guard shuts the box down after this many minutes and confirms the vendor says it is off")
+            q.add_argument("--budget-cny", type=float, help="refuse unless today's hours run (from the ledger) plus this one (price per hour x --max-minutes) stay within this many CNY; needs --max-minutes")
     q = isub.add_parser("create")
     q.add_argument("--spec", required=True, help="a JSON file of the vendor's create request, or - for stdin")
     q.add_argument("--yes", action="store_true")
@@ -327,10 +411,19 @@ def main(argv: list[str] | None = None) -> int:
     q.add_argument("--poll", type=float, default=30, help="seconds between reads of the vendor's free-card page while waiting (default 30; the page asks for no more than one in half a minute)")
     q.add_argument("--yes", action="store_true", help="do it; without it the plan is printed and nothing changes")
     q.add_argument("--max-minutes", type=float, help="a hard cap for every box this call powers on or creates: a background guard shuts each down after this many minutes (needs --yes)")
+    q.add_argument("--budget-cny", type=float, help="refuse a power-on or create that would take today's hours run (from the ledger, each set aside to its cap) above this many CNY; needs --max-minutes")
+    q.add_argument("--instance", action="append", default=[], help="an instance of the account to count and power on first, though it is not wired in the settings nor made by this ledger (repeatable; else CLOUDGPU_ENSURE_INSTANCES, comma separated)")
     q = isub.add_parser("guard", help="wait N minutes, shut the box down, confirm the vendor says it is off (what --max-minutes starts in the background); exit 0 off, 1 not")
     q.add_argument("id")
     q.add_argument("--minutes", type=float, required=True)
     q.add_argument("--agent", action="store_true", help="an agent's call: only a box this agent created")
+    lg = sub.add_parser("ledger", help="the ledger of what the package powered, created and released: today (hours run and CNY, free), add (a person records a spend made outside the package)")
+    lsub = lg.add_subparsers(dest="lcmd", required=True)
+    lsub.add_parser("today")
+    la = lsub.add_parser("add")
+    la.add_argument("--cny", type=float, required=True, help="CNY spent today outside the package (the vendor's console, a hand-run script); counts against --budget-cny")
+    la.add_argument("--by", required=True, help="who records it (kept with the time)")
+    la.add_argument("--note", default="", help="what it was (free text)")
     qs = sub.add_parser("quota", help="the allowance an agent may rent boxes inside: show (free), set (a person; records who and when)")
     qsub = qs.add_subparsers(dest="qcmd", required=True)
     qsub.add_parser("show")
@@ -362,6 +455,8 @@ def main(argv: list[str] | None = None) -> int:
         return instances(a)
     if a.cmd == "quota":
         return quota_cmd(a)
+    if a.cmd == "ledger":
+        return ledger_cmd(a)
     if a.cmd == "status":
         from . import config
         from .status import status
@@ -396,7 +491,7 @@ def main(argv: list[str] | None = None) -> int:
                 print(json.dumps({"released": hold.release(sd, a.box), "box": hold.box_key(a.box)}))
             else:
                 h = hold.place(sd, a.box, a.minutes, a.who, a.why)
-                print(json.dumps({**h, "until_local": hold.clock(h["until"]), "next": [f"python3 -m cloudgpu release {h['box']} when you are done; it ends by itself at {hold.clock(h['until'])}"]}, ensure_ascii=False))
+                print(json.dumps({**h, "until_local": hold.clock(h["until"]), "next": [f"openmax-cloudgpu release {h['box']} when you are done; it ends by itself at {hold.clock(h['until'])}"]}, ensure_ascii=False))
             return 0
         except CloudGpuError as e:
             print(json.dumps({"error": e.message, "kind": e.kind, "next": e.next}, ensure_ascii=False))

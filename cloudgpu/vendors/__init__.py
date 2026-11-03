@@ -1,5 +1,5 @@
 """The cloud vendors: one module each, one small interface. A vendor is the ACCOUNT's API (list my instances, one instance's detail, its status, power it on and off,
-create one, release one); the power backend (`power.py`) and the CLI (`python3 -m cloudgpu instances ...`) are built on it. To take in a new cloud, write a `Vendor`
+create one, release one); the power backend (`power.py`) and the CLI (`openmax-cloudgpu instances ...`) are built on it. To take in a new cloud, write a `Vendor`
 subclass in a module here (its token variable, its calls, the normalising of its answers into `Instance` and the snapshot dict) and add it to VENDORS: nothing else changes.
 Calls are made from code against the vendor's documented API; nothing is ever run from a command taken from a file or the environment.
 

@@ -1,4 +1,4 @@
-"""How much a box works, read from its task records (`python3 -m cloudgpu util [--since TIME] [BOX...]`), read only.
+"""How much a box works, read from its task records (`openmax-cloudgpu util [--since TIME] [BOX...]`), read only.
 
 Whether a box is the bottleneck cannot be told from a consumer's own wall clock: the adapter's records say how long a take took on the box and how often one arrived. The adapter lists them
 (`GET /cloudgpu/tasks`, 0.12.0, token-checked; it keeps a record for 24 h, so a report reaches back a day at most); `fetch` reads that over the box's tunnel and `report` is the statistics, a pure

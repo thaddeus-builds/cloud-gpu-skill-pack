@@ -15,9 +15,9 @@ calls a client of that API already makes, so a client needs a base URL and a tok
                                                                 says it (at most COMFY_CACHE_S old), null when ComfyUI is down or does not say; `voice` is true when indextts2-v1 is installed; `t2v` is true when this adapter serves minimax_h3_t2v (an adapter without it does not say, and refuses the workflow). `audio_lock` lists the `lock`
                                                                 values of minimax_h3_image_audio_locked this box serves RIGHT NOW (["official","addguide"], ["official","addguide","audiodrive"], or [] when ComfyUI has no usable lock node or
                                                                 has not answered yet; an adapter older than 0.20.0 has no such key and refuses the workflow); `audio_lock_detail` says per lock whether its node
-                                                                was found in ComfyUI's /object_info, where it comes from (module, pack, commit) and, for audiodrive, whether the operator switched it on. `proof` lets a client that holds the token tell
+                                                                was found in ComfyUI's /object_info, where it comes from (module, pack, commit) and, for audiodrive, whether the operator switched it on.
                                                                 `services` (0.22.0) says per service ("comfy", "voxcpm") {"state": "up"|"starting"|"down"|"absent", "reason", "port", "log" [, "loaded" (voxcpm: its model is in memory)]}:
-                                                                `comfy` is the same fact as the `comfy` key with the reason a person can act on; "absent" = not installed on this box (VoxCPM is optional). An adapter older than 0.21.0 has no such key.
+                                                                `comfy` is the same fact as the `comfy` key with the reason a person can act on; "absent" = not installed on this box (VoxCPM is optional). An adapter older than 0.22.0 has no such key.
                                                                 `proof` lets a client that holds the token tell
                                                                 this adapter from another process holding the tunnel's port: it is answered only when the
                                                                 bind address is loopback, for a nonce of 16 to 64 lowercase hex characters, at most
@@ -1204,6 +1204,8 @@ class Host:
             state, reason, last = service_view(up, rec, pid_alive, now, since)
             if busy and up:
                 reason = "accepts connections but did not answer /voxcpm/v1/health in time (working on a voice?)"
+            if not self.proof_ok:                    # a widened bind answers anyone: no folder names in a reason
+                reason = re.sub(r"(?<![\w.])/[\w.\-/]{2,}", "<path>", reason)
             e = {"state": state, "reason": reason, "port": port, "log": "logs/" + ("comfyui.log" if name == "comfy" else "voxcpm.log")}
             if name == "voxcpm":
                 e["loaded"] = loaded if up else None

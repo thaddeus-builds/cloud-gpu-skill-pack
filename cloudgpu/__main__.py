@@ -50,6 +50,8 @@ def instances(a, out=print) -> int:
             _say(expiry.alerts(prow.values()))
         elif c == "stock":
             return stock_cmd(a, v, out)
+        elif c == "guard":
+            return guard_cmd(a, v, out)
         elif c == "expiry":
             rs = expiry.account_rows(v, only=set(a.ids) or None, days=_days(a))
             doc = {"warn_days": _days(a), "level": expiry.worst(rs), "passes": rs, "alerts": [r["message"] for r in expiry.alerts(rs)]}
@@ -78,8 +80,12 @@ def instances(a, out=print) -> int:
                 if a.id not in mine and not (c == "power-on" and a.id in pool_instances(os.environ)):
                     raise CloudGpuError("not_allowed", f"{a.id} is not a box this agent made" + (" or one wired in the settings" if c == "power-on" else "") + f": a person does {c} on it",
                                         ["tell the person; the agent touches only its own boxes"])
+            cap = None
+            if c == "power-on" and getattr(a, "max_minutes", None) is not None:
+                from . import guard
+                cap = guard.minutes_ok(a.max_minutes)
             if not a.yes:
-                out(json.dumps({"dry_run": True, "would": c, "id": a.id, "next": [f"pass --yes (a person does) to {c}" + (": it starts the hourly billing" if c == "power-on" else "")]}))
+                out(json.dumps({"dry_run": True, "would": c, "id": a.id, **({"would_guard": f"shut it down after {cap:g} minutes and confirm"} if cap else {}), "next": [f"pass --yes (a person does) to {c}" + (": it starts the hourly billing" if c == "power-on" else "")]}))
                 return 0
             v.power_on(a.id) if c == "power-on" else v.power_off(a.id)
             st, done = _steward(v, a), {"done": c, "id": a.id}
@@ -87,6 +93,8 @@ def instances(a, out=print) -> int:
                 st.ledger.append(c, vendor=v.name, instance=a.id, actor=st.actor, agent=bool(a.agent))
             except OSError:
                 done["ledger"] = "not written"
+            if cap:
+                done["guard"] = _spawn_guard(v, a.id, cap, bool(a.agent))
             out(json.dumps(done))
         elif c == "create":
             spec = json.loads(sys.stdin.read() if a.spec == "-" else Path(a.spec).read_text())
@@ -121,6 +129,38 @@ def instances(a, out=print) -> int:
     except CloudGpuError as e:
         out(json.dumps({"error": e.message, "kind": e.kind, "next": e.next, **({"status": e.status} if e.status is not None else {})}, ensure_ascii=False))
         return 1
+
+
+def _spawn_guard(v, instance_id: str, minutes: float, agent: bool) -> dict:
+    """Start `instances guard` in the background for `instance_id`; its output goes to a log in the state directory. The result says when it will shut the box and where it writes."""
+    import subprocess
+    from . import guard, hold
+    sd = hold.state_dir()
+    sd.mkdir(parents=True, exist_ok=True, mode=0o700)
+    log = sd / f"guard-{instance_id}.log"
+    cmd = [sys.executable, "-m", "cloudgpu", "instances", "--vendor", v.name, "guard", instance_id, "--minutes", f"{minutes:g}"] + (["--agent"] if agent else [])
+    with open(log, "ab") as f:
+        p = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=f, stderr=f, cwd=str(HERE.parent), start_new_session=True)
+    return {"pid": p.pid, "off_at": guard.off_at(minutes), "log": str(log), "reads": f"tail -1 {log}"}
+
+
+def guard_cmd(a, v, out) -> int:
+    from .errors import CloudGpuError
+    """`instances guard ID --minutes N`: wait, shut the box down, confirm the vendor says it is off. Exit 0 off, 1 not (the line says why)."""
+    from . import guard
+    minutes = guard.minutes_ok(a.minutes)
+    st = _steward(v, a)
+    if a.agent and a.id not in st.ledger.created(v.name):
+        raise CloudGpuError("not_allowed", f"{a.id} is not a box this agent made: a person does power-off on it")
+
+    def note():
+        try:
+            st.ledger.append("power-off", vendor=v.name, instance=a.id, actor="guard", agent=bool(a.agent))
+        except OSError:
+            pass
+    r = guard.run(v, a.id, minutes, on_off=note)
+    out(json.dumps(r, ensure_ascii=False))
+    return 0 if r["off"] else 1
 
 
 def stock_cmd(a, v, out) -> int:
@@ -183,6 +223,12 @@ def ensure_cmd(a, v, out) -> int:
             return 2
     st = Steward(v, os.environ, agent=True)
     r = st.ensure(a.count, template, specs=specs, centers=centers, yes=a.yes, patience=a.patience, poll=a.poll)
+    cap = getattr(a, "max_minutes", None)
+    if cap is not None and a.yes:
+        from . import guard
+        cap = guard.minutes_ok(cap)
+        ids = list(r.get("powered_on") or []) + [c["created"] for c in r.get("created") or []]
+        r["guards"] = {i: _spawn_guard(v, i, cap, True) for i in ids}
     out(json.dumps(r, ensure_ascii=False))
     return 0 if not r["missing"] else 1
 
@@ -266,6 +312,8 @@ def main(argv: list[str] | None = None) -> int:
         if c in ("power-on", "power-off", "release"):
             q.add_argument("--yes", action="store_true")
             q.add_argument("--agent", action="store_true", help="an agent's call: release only touches an instance this agent created (ledger)")
+        if c == "power-on":
+            q.add_argument("--max-minutes", type=float, help="a hard cap: after the power-on, a background guard shuts the box down after this many minutes and confirms the vendor says it is off")
     q = isub.add_parser("create")
     q.add_argument("--spec", required=True, help="a JSON file of the vendor's create request, or - for stdin")
     q.add_argument("--yes", action="store_true")
@@ -278,6 +326,11 @@ def main(argv: list[str] | None = None) -> int:
     q.add_argument("--patience", type=float, default=600, help="seconds to keep trying when no card is in stock (default 600)")
     q.add_argument("--poll", type=float, default=30, help="seconds between reads of the vendor's free-card page while waiting (default 30; the page asks for no more than one in half a minute)")
     q.add_argument("--yes", action="store_true", help="do it; without it the plan is printed and nothing changes")
+    q.add_argument("--max-minutes", type=float, help="a hard cap for every box this call powers on or creates: a background guard shuts each down after this many minutes (needs --yes)")
+    q = isub.add_parser("guard", help="wait N minutes, shut the box down, confirm the vendor says it is off (what --max-minutes starts in the background); exit 0 off, 1 not")
+    q.add_argument("id")
+    q.add_argument("--minutes", type=float, required=True)
+    q.add_argument("--agent", action="store_true", help="an agent's call: only a box this agent created")
     qs = sub.add_parser("quota", help="the allowance an agent may rent boxes inside: show (free), set (a person; records who and when)")
     qsub = qs.add_subparsers(dest="qcmd", required=True)
     qsub.add_parser("show")

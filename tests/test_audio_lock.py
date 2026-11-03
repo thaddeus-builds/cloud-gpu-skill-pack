@@ -363,7 +363,8 @@ def test_a_run_time_check_stops_a_take_whose_node_vanished_after_it_was_accepted
             p = adapter.plan(adapter.LOCKED_WORKFLOW, BODY)
             assert p["lock"] == "addguide" and p["kind"] == "ref"
             t = {"id": "h3-" + "0" * 20, "workflow": adapter.LOCKED_WORKFLOW, "status": "RUNNING", "created": time.time(), "plan": p, "inputs": ["s.png", "v.wav"]}
-            b.comfy.nodes = {}
+            assert h.lock_caps()["locks"]["addguide"]["usable"], "the cache says the node is there"
+            b.comfy.nodes = {}                                          # ComfyUI restarted without it, inside the cache's 30 s
             try:
                 h.run(t)
             except adapter.LockUnavailable as e:
@@ -489,6 +490,66 @@ def test_only_an_explicit_one_in_the_environment_switches_the_third_party_lock_o
             assert h["audio_lock_detail"]["audiodrive"]["allowed"] is on, (value, h["audio_lock_detail"]["audiodrive"])
             assert (h["audio_lock"] == ["addguide", "audiodrive"]) is on and (h["audio_lock"] == ["addguide"]) is (not on), (value, h["audio_lock"])
             assert ("ENABLED" in err) is on, (value, err)
+
+
+def test_a_node_that_vanished_inside_the_cache_window_is_refused_at_the_door_and_stops_a_take_that_was_already_accepted():
+    with _t.tmpdir() as d:
+        b = box(d, nodes=("addguide", "audiodrive"), allow=True)
+        try:
+            h = b.call("GET", "/health", token=None)[1]
+            assert h["audio_lock"] == ["addguide", "audiodrive"], "the cache is primed with both nodes"
+            b.comfy.nodes = {}                                          # a ComfyUI restart without them, inside LOCK_CACHE_S
+            for lock in ("addguide", "audiodrive"):
+                code, doc = b.call("POST", LOCKED, {**BODY, "lock": lock})
+                assert code == 400 and doc["msg"].startswith("lock_node_missing:") and adapter.LOCK_NODES[lock] in doc["msg"], (lock, doc)
+            assert not b.comfy.graphs
+            b.comfy.nodes = {"VRGDG_MiniMaxH3AudioDrive": DEFS["audiodrive"]}        # and one that came back is used at once
+            code, doc = b.call("POST", LOCKED, {**BODY, "lock": "audiodrive"})
+            assert code == 200 and b.wait(doc["data"]["task_id"])["status"] == "SUCCESS"
+        finally:
+            b.close()
+
+
+def test_a_widened_bind_does_not_tell_anyone_the_commit_or_version_of_the_third_party_pack():
+    with _t.tmpdir() as d:
+        for bind, shown in (("127.0.0.1", True), ("0.0.0.0", False)):
+            b = Box(d + "/" + bind, bind=bind, allow_vrgdg=True)
+            try:
+                b.comfy.nodes = {adapter.LOCK_NODES[k]: DEFS[k] for k in adapter.LOCK_NODES}
+                pack = b.root / "custom_nodes" / PREFIX
+                (pack / ".git").mkdir(parents=True)
+                (pack / ".git" / "HEAD").write_text(SHA_A + "\n")
+                (pack / "pyproject.toml").write_text('version = "1.2.3"\n')
+                a = b.call("GET", "/health", token=None)[1]["audio_lock_detail"]["audiodrive"]
+                assert (a["commit"] == SHA_A and a["version"] == "1.2.3") is shown and a["pack"] == PREFIX and a["usable"] is True, (bind, a)
+                if not shown:
+                    assert a["commit"] is None and a["version"] is None
+                    assert b.host.lock_caps()["locks"]["audiodrive"]["commit"] == SHA_A, "only the answer is blanked, not what the adapter knows"
+            finally:
+                b.close()
+
+
+def test_the_new_lock_code_names_no_model_and_no_step_count():
+    import ast
+    tree = ast.parse(Path(adapter.__file__).read_text())
+    new = {"lock_addguide", "lock_audiodrive", "lock_custom", "plan_lock", "lock_words", "lock_entry", "node_inputs", "pack_of", "git_head", "pack_version",
+           "unknown_locks", "lock_caps", "lock_problem"}
+
+    def clean(node, what):
+        for n in ast.walk(node):
+            assert not (isinstance(n, ast.Name) and n.id == "MODELS"), f"{what} reads MODELS"
+            assert not (isinstance(n, ast.Constant) and isinstance(n.value, str) and ("safetensors" in n.value or "steps" in n.value)), f"{what} names a model file or the steps"
+
+    seen = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name in new:
+            seen.add(node.name)
+            clean(node, node.name)
+    assert seen == new, new - seen
+    graph_fn = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "graph")
+    block = [n for n in graph_fn.body if isinstance(n, ast.If) and "lock" in ast.dump(n.test)]
+    assert len(block) == 1, "graph() has one lock block"
+    clean(block[0], "graph()'s lock block")
 
 
 if __name__ == "__main__":

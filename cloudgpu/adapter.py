@@ -65,7 +65,7 @@ The audio-locked workflow (0.20.0). The unlocked audio-driven graph lets the mod
 The adapter never falls back from a lock to the unlocked graph or to another lock: a lock whose node ComfyUI does not have, or which the operator has not allowed, is a coded error (400 on the
 take; a take accepted while ComfyUI was still starting and then found without the node is FAILED with the same words), the words starting `lock_unknown`, `lock_not_implemented`,
 `lock_wrong_workflow`, `lock_not_allowed`, `lock_node_missing`, `lock_node_incompatible` or `lock_state_unknown`. The nodes are found by name in ComfyUI's /object_info at start and again when asked
-(at most LOCK_CACHE_S old, and fresh for each take of a lock); no model file name is written in the lock code: the models are the box's MODELS as for every graph.
+(/health: at most LOCK_CACHE_S old; read afresh for each take of a lock, at the door and again when it runs); no model file name is written in the lock code: the models are the box's MODELS as for every graph.
 
 The H3 models live in the ComfyUI process, not in this adapter (standard library only, no torch), and ComfyUI keeps them on the card after a take. So after a take that leaves
 nothing accepted or queued, the adapter asks ComfyUI to free them (POST /free, best effort: a failure never fails a take). The next take loads its models again; FREE_AFTER_TAKE
@@ -599,7 +599,7 @@ def git_head(folder: Path) -> str | None:
         except OSError:
             val = next((ln.split()[0] for ln in (git / "packed-refs").read_text().splitlines() if ln.endswith(" " + ref)), "")
         return val if re.fullmatch(r"[0-9a-f]{40}", val) else None
-    except (OSError, UnicodeDecodeError, IndexError):
+    except (OSError, ValueError, IndexError):          # ValueError: an undecodable file or a NUL in a path
         return None
 
 
@@ -934,9 +934,12 @@ class Host:
         card = self.card()
         up = self.comfy_up()
         caps = self.lock_caps() if up else self.unknown_locks()          # no ComfyUI, no knowledge: no lock is offered
+        locks = caps["locks"]
+        if not self.proof_ok:                  # a widened bind answers anyone: which build of third-party code runs here is not told (loopback, the tunnel, is)
+            locks = {k: {**e, "commit": None, "version": None} if "commit" in e else e for k, e in locks.items()}
         d = {"ok": alive, "comfy": up, "busy": self.busy(), "worker": "alive" if alive else "dead", "card": card,
              "memory_mib": self._mem_mib if card != "unknown" else None, "vram_free_mib": self._vram_free if up else None, "voice": bool(self.tts), "files": 1, "t2v": True,
-             "audio_lock": [k for k, e in caps["locks"].items() if e["usable"]], "audio_lock_detail": {"checked": caps["checked"], **caps["locks"]}}
+             "audio_lock": [k for k, e in locks.items() if e["usable"]], "audio_lock_detail": {"checked": caps["checked"], **locks}}
         if nonce and self.proof_ok and NONCE.fullmatch(nonce) and self._proof_allowed():
             d["proof"] = hmac.new(self.token.encode(), nonce.encode(), "sha256").hexdigest()
         return d
@@ -975,23 +978,17 @@ class Host:
             return caps
 
     def lock_problem(self, lock: str, door: bool) -> str | None:
-        """The coded words saying why a take of `lock` cannot be served now, None when it can. `door`: the take is only being accepted. A lock that is not usable on the cached read is asked about again
-        before it is refused (a node appears when ComfyUI restarts, a refusal must not be stale). At the door a ComfyUI that did not answer is not a refusal (a cold box is still starting: the take
-        waits for it, and run() asks again); once the take runs, the same silence fails it. Never a fallback to another graph."""
+        """The coded words saying why a take of `lock` cannot be served now, None when it can. ComfyUI's node list is read afresh every time (two small calls per take, never the cache: a node
+        that vanished with a ComfyUI restart must stop the take in words, and one that appeared must not be refused as missing). `door`: the take is only being accepted; a ComfyUI that did not
+        answer is then not a refusal (a cold box is still starting: the take waits for it and run() asks again), but once the take runs the same silence fails it. Never a fallback to another graph."""
         if lock not in LOCK_NODES:
             return CUSTOM_WORDS if lock == "custom" else f"lock_unknown: lock {lock!r} is not one of {', '.join(LOCKS)}"
         if lock == "audiodrive" and not self.allow_vrgdg:
             return lock_words(lock, "allowed")        # the licence switch is looked at before ComfyUI is asked anything, and it does not change while the adapter runs
-        e = self.lock_caps()["locks"][lock]
-        if e["usable"]:
-            return None
         caps = self.lock_caps(fresh=True)
-        e = caps["locks"][lock]
-        if e["usable"]:
-            return None
         if door and not caps["checked"]:
             return None
-        return e["problem"]
+        return caps["locks"][lock]["problem"]
 
     # ---- worker ----
     def comfy_json(self, path: str, body=None, timeout=60):

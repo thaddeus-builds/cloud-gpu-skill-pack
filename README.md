@@ -16,7 +16,8 @@ tests/              python3 tests/run.py (offline: a fake ComfyUI stands in for 
 ```
 
 ```
-# pip install . gives the command openmax-cloudgpu (the playbook's name, R19) and its short form cloudgpu; python3 -m cloudgpu is the same without installing
+# uv tool install . (from a checkout; the fleet uses uv, R18) puts openmax-cloudgpu (the playbook's name, R19) and its short form cloudgpu on the PATH; update: uv tool install --reinstall .
+# without installing: uv run --no-project python -m cloudgpu ... (or python3 -m cloudgpu)
 openmax-cloudgpu status          # where the box stands, read only
 openmax-cloudgpu util --since 2h  # how much each box works, from its task records, read only
 openmax-cloudgpu instances list  # the cloud account (autodl): list, status, snapshot; power, create, release only with --yes

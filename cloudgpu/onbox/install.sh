@@ -29,7 +29,7 @@ case "${CLOUDGPU_COMFY_PORT:-}" in
 esac
 mkdir -p "$D"; chmod 700 "$D"
 cp "$HERE/adapter.py" "$D/server.py"
-# ComfyUI and VoxCPM are started after a boot by services.py (0.21.0), run by start.sh below: ComfyUI's folder and the settings given here are written to services.json for it
+# ComfyUI and VoxCPM are started after a boot by services.py (0.22.0), run by start.sh below: ComfyUI's folder and the settings given here are written to services.json for it
 SERVICES=""
 if [ -f "$HERE/services.py" ]; then
   cp "$HERE/services.py" "$D/services.py"

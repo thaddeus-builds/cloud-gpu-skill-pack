@@ -1,6 +1,6 @@
 """Where a box stands, read only: the settings (names, set or unset), the box's /health, the power backend's account view. Sends no take, powers
 nothing on or off, writes nothing, costs nothing, lists the active holds, prints no value of a setting. `ready` is true when a take could go to the box now; `next` says
-what a person must do otherwise, one line each. `services` says per process the box needs (adapter, comfy, voxcpm) {state: up | starting | down | absent | unknown, reason}: the adapter's view of the box's own processes (0.21.0). `line` is the box's own line of callers (who runs and who waits, any machine); `queue` is this machine's. A consumer adds its own checks (prices, a project's switch) to `next`."""
+what a person must do otherwise, one line each. `services` says per process the box needs (adapter, comfy, voxcpm) {state: up | starting | down | absent | unknown, reason}: the adapter's view of the box's own processes (0.22.0). `line` is the box's own line of callers (who runs and who waits, any machine); `queue` is this machine's. A consumer adds its own checks (prices, a project's switch) to `next`."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ def _norm(text: str) -> str:
 
 
 def services_view(health: dict | None, reach_ok: bool, impostor: bool) -> dict:
-    """{adapter, comfy, voxcpm: {state, reason}}: state is up | starting | down | absent | unknown. The box's /health says comfy and voxcpm (0.21.0); an older adapter says only
+    """{adapter, comfy, voxcpm: {state, reason}}: state is up | starting | down | absent | unknown. The box's /health says comfy and voxcpm (0.22.0); an older adapter says only
     whether comfy answers; with no adapter answering, the other two are not known."""
     if health is None:
         if not reach_ok:
@@ -38,9 +38,9 @@ def services_view(health: dict | None, reach_ok: bool, impostor: bool) -> dict:
             out[n] = {k: e[k] for k in ("state", "reason", "port", "log", "loaded", "last_line") if k in e}
         elif n == "comfy":
             out[n] = {"state": "up" if health.get("comfy") else "down",
-                      "reason": "answers" if health.get("comfy") else "does not answer (an adapter older than 0.21.0 does not say why)"}
+                      "reason": "answers" if health.get("comfy") else "does not answer (an adapter older than 0.22.0 does not say why)"}
         else:
-            out[n] = {"state": "unknown", "reason": "an adapter older than 0.21.0 does not report it"}
+            out[n] = {"state": "unknown", "reason": "an adapter older than 0.22.0 does not report it"}
     return out
 
 
@@ -85,7 +85,7 @@ def status(env: Mapping | None = None, envfile: str | None = None) -> dict:
         elif isinstance(c, dict) and c.get("state") in ("down", "absent"):
             nxt.append(f"ComfyUI is {c['state']} on the box: {c.get('reason')}. start.sh on the box starts it (it starts only what is down); its log is {c.get('log') or 'logs/comfyui.log'} in the adapter's folder")
         else:
-            nxt.append("the adapter answers but ComfyUI does not yet: wait a minute after a power-on, then run this again (an adapter older than 0.21.0 does not say why)")
+            nxt.append("the adapter answers but ComfyUI does not yet: wait a minute after a power-on, then run this again (an adapter older than 0.22.0 does not say why)")
     vox = (health.get("services") or {}).get("voxcpm") if health and isinstance(health.get("services"), dict) else None
     if isinstance(vox, dict) and vox.get("state") in ("down", "starting"):
         nxt.append(f"VoxCPM (the voice service) is {vox['state']} on the box: {vox.get('reason')}; a Make with a VoxCPM voice needs it, an H3 take does not")

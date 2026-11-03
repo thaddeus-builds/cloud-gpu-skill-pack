@@ -302,7 +302,8 @@ def make_plan(name: str, cfg: dict, d: Path, env=None) -> dict:
         root, tried = find_comfy_root(cfg, d, env)
         if cfg.get("comfy_cmd"):
             argv = shlex.split(cfg["comfy_cmd"])
-            return {**base, "argv": argv, "cwd": root or d, "match": cfg.get("comfy_match") or re.escape(" ".join(argv))}
+            # the whole command as given, or ComfyUI's own `main.py ... --port N` line: a wrapper (`sh -c 'exec python main.py ...'`) shows a different line from the process it starts
+            return {**base, "argv": argv, "cwd": root or d, "match": cfg.get("comfy_match") or r"(%s)|(main\.py\b.*--port[ =]%d(\s|$))" % (re.escape(" ".join(argv)), port)}
         if root is None:
             return {**base, "absent": "no ComfyUI folder found (a folder with main.py): looked at " + ", ".join(tried) + " and more; CLOUDGPU_COMFY_ROOT names it"}
         py, tried_py = find_comfy_python(cfg, root)

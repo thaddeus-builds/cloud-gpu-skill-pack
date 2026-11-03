@@ -20,11 +20,13 @@ start.sh at boot) from racing. Nothing is restarted, killed or stopped here.
 Where things are (nothing is fixed to one image; each setting is the environment first, then DIR/services.json, then what is looked for):
     DIR                  CLOUDGPU_DIR, default ~/h3host (the adapter's folder; install.sh makes it)
     ComfyUI's folder     CLOUDGPU_COMFY_ROOT, else the folder install.sh was run with (services.json), else the first folder with a main.py and a comfy/ or custom_nodes/ folder among
-                         ~/ComfyUI, /root/autodl-tmp/ComfyUI, ... and every folder one level under ~, /root/autodl-tmp, /root/autodl-fs, /workspace, /opt
-    ComfyUI's Python     CLOUDGPU_COMFY_PYTHON, else the first of ROOT/venv, ROOT/.venv, the Python install.sh ran with, this one, python3 on PATH, miniconda3, conda that can import torch
+                         ~/ComfyUI (/root/ComfyUI), /root/autodl-tmp/ComfyUI, ... and every folder one level under ~, /root, /root/autodl-tmp, /root/autodl-fs, /workspace, /opt
+    ComfyUI's Python     CLOUDGPU_COMFY_PYTHON, else the first of ROOT/venv, ROOT/.venv, ~/miniconda3 (/root/miniconda3/bin/python), the Python install.sh ran with, this one, python3 on PATH, conda that can import torch
     other ComfyUI parts  CLOUDGPU_COMFY_PORT (6006), CLOUDGPU_COMFY_ARGS (extra arguments), CLOUDGPU_COMFY_CMD (the whole command, instead of the above), CLOUDGPU_COMFY_WAIT_S (420)
-    VoxCPM               CLOUDGPU_VOXCPM_CMD (the whole command, run in CLOUDGPU_VOXCPM_DIR), else a launcher named start.sh, serve.sh, start_service.sh, run_service.sh or
-                         voxcpm_service.sh in CLOUDGPU_VOXCPM_DIR or in a folder with "voxcpm" in its name under DIR, ~, /root/autodl-tmp, /root/autodl-fs, /workspace, /opt;
+    VoxCPM               CLOUDGPU_VOXCPM_CMD (the whole command, run in CLOUDGPU_VOXCPM_DIR), else the launcher of a folder with "voxcpm" in its name (the operator's box:
+                         `bash start.sh` in /root/voxcpm-svc) in CLOUDGPU_VOXCPM_DIR, DIR, or under ~, /root, /root/autodl-tmp, /root/autodl-fs, /workspace, /opt; launcher names:
+                         start.sh, serve.sh, start_service.sh, run_service.sh, voxcpm_service.sh. A launcher may kill the copy it finds before it starts one (the operator's start.sh
+                         kills the pid in svc.pid), so "is it running" is asked BEFORE the launcher is called, by the launcher's path and by the .py files its text names;
                          CLOUDGPU_VOXCPM_PORT (8190), CLOUDGPU_VOXCPM_WAIT_S (120), CLOUDGPU_VOXCPM_MATCH (a regex on the process command line, to recognise a copy that is already running)
     switch               CLOUDGPU_SERVICES_AUTOSTART=0 starts nothing (status still reports); CLOUDGPU_GPU_WAIT_S (90): how long to wait for nvidia-smi before ComfyUI is started
     CLOUDGPU_SERVICES_SEARCH  the folders searched (a path list) instead of the defaults above
@@ -65,6 +67,7 @@ HEALTH_PATH = {"comfy": "/system_stats", "voxcpm": "/voxcpm/v1/health"}
 LOG_MAX = 20 * 1024 * 1024
 LAUNCHERS = ("start.sh", "serve.sh", "start_service.sh", "run_service.sh", "voxcpm_service.sh")
 EXITED_OK_GRACE_S = 60             # a launcher that returned 0 may have started the service in the background: wait this long more for it to answer
+SELF_CMD = re.compile(r"(^|[\s/])services\.py\s+(up|status|configure)\b")      # this script's own command line is never "a copy of the service"
 SETTINGS = {                       # key: (environment variable, kind)
     "autostart": ("CLOUDGPU_SERVICES_AUTOSTART", "flag"),
     "comfy_root": ("CLOUDGPU_COMFY_ROOT", "str"), "comfy_python": ("CLOUDGPU_COMFY_PYTHON", "str"), "comfy_args": ("CLOUDGPU_COMFY_ARGS", "str"),
@@ -138,7 +141,7 @@ def search_bases(d: Path, env=None) -> list[Path]:
     given = env.get("CLOUDGPU_SERVICES_SEARCH")
     if given:
         return [Path(os.path.expanduser(p)) for p in given.split(os.pathsep) if p]
-    return [Path.home(), Path("/root/autodl-tmp"), Path("/root/autodl-fs"), Path("/workspace"), Path("/opt")]
+    return [Path.home(), Path("/root"), Path("/root/autodl-tmp"), Path("/root/autodl-fs"), Path("/workspace"), Path("/opt")]
 
 
 def is_comfy_root(p: Path) -> bool:
@@ -189,7 +192,7 @@ def find_comfy_python(cfg: dict, root: Path) -> tuple[str | None, list]:
     cands = [str(root / "venv" / "bin" / "python"), str(root / ".venv" / "bin" / "python")]
     if cfg.get("python_hint"):
         cands.append(cfg["python_hint"])
-    cands += [sys.executable, shutil.which("python3") or "", shutil.which("python") or "", os.path.expanduser("~/miniconda3/bin/python"), "/root/miniconda3/bin/python", "/opt/conda/bin/python"]
+    cands += [os.path.expanduser("~/miniconda3/bin/python"), "/root/miniconda3/bin/python", sys.executable, shutil.which("python3") or "", shutil.which("python") or "", "/opt/conda/bin/python"]
     tried = []
     for c in cands:
         if not c or c in tried or not os.path.isfile(c):
@@ -214,6 +217,26 @@ def find_voxcpm_launcher(cfg: dict, d: Path, env=None) -> tuple[Path | None, lis
         if len(tried) < 3:
             tried.append(str(p))
     return None, tried
+
+
+def launcher_match(launcher: Path) -> str:
+    """A regex that recognises the service a launcher script starts, for the check that runs BEFORE the launcher is called (a launcher may kill the copy it finds and start another,
+    as the operator's start.sh does with the pid in svc.pid): a process that runs the launcher's path, or runs one of the .py files its text mentions (voxcpm_service.py ...), either
+    directly or as the script of a Python (`python [-flags] [dir/]name.py`). A command line that merely mentions the name (an editor, a tail, a grep) is not a copy."""
+    try:
+        text = launcher.read_text(errors="replace")[:20000]
+    except OSError:
+        text = ""
+    parts = [r"(^|\s)%s(\s|$)" % re.escape(str(launcher))]
+    names = []
+    for m in re.finditer(r"(?<![\w.-])([\w.-]+\.py)\b", text):
+        if m.group(1) not in names and len(names) < 4:
+            names.append(m.group(1))
+    for n in names:
+        e = re.escape(n)
+        parts.append(r"^(\S*/)?(python[\d.]*|Python)\s+(-\S+\s+)*(\S*/)?%s(\s|$)" % e)
+        parts.append(r"^(\S*/)?%s(\s|$)" % e)
+    return "|".join(parts)
 
 
 def make_plan(name: str, cfg: dict, d: Path, env=None) -> dict:
@@ -241,7 +264,7 @@ def make_plan(name: str, cfg: dict, d: Path, env=None) -> dict:
         return {**base, "absent": "VoxCPM is not installed here: no launcher (" + ", ".join(LAUNCHERS) + ") in a voxcpm folder"
                 + (f" (looked in {', '.join(tried)})" if tried else "") + "; CLOUDGPU_VOXCPM_CMD names the command"}
     shell = shutil.which("bash") or shutil.which("sh") or "sh"
-    return {**base, "argv": [shell, str(launcher)], "cwd": launcher.parent, "match": cfg.get("voxcpm_match") or re.escape(str(launcher))}
+    return {**base, "argv": [shell, str(launcher)], "cwd": launcher.parent, "match": cfg.get("voxcpm_match") or launcher_match(launcher)}
 
 
 # ---- looking ------------------------------------------------------------------------------------------------------------
@@ -393,7 +416,7 @@ def find_running(plan: dict, started_group=None) -> int | None:
             rx = None
         if rx is not None:
             for pid, cmd in processes():
-                if pid != me and rx.search(cmd) and "services.py" not in cmd:
+                if pid != me and rx.search(cmd) and not SELF_CMD.search(cmd):
                     return pid
     if type(started_group) is int and started_group > 1:
         for pid, grp in process_groups().items():

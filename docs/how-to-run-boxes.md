@@ -17,7 +17,7 @@
 | a pass **has ended** | ERROR: id, name, when it ended | **a person**, in the console | renew or rent again; an agent cannot, and powering on will not help. Meanwhile the work goes to the other passes, then to a top-up box |
 | a pass gives **no end time** | WARN: its end cannot be watched | a person | look at it in the console |
 | **one more box is needed** (a surge, a pass is missing) | `ensure` says how many are up and missing | the agent, inside the allowance | `instances ensure --count N --spec template.json --yes`; release the hourly boxes after |
-| **no card is free** (`no_stock`) | `ensure` retries for `--patience` seconds, then reports `missing` and why | the agent, then a person | try another spec or data center; if still short, a person rents in the console (a pass bought early is how a card is not missed) |
+| **no card is free** (`no_stock`) | `ensure` reads the vendor's free-card page every `--poll` seconds and creates the moment a card in your order shows, until `--patience`, then reports `missing` and why | the agent, then a person | try another spec or data center; if still short, a person rents in the console (a pass bought early is how a card is not missed) |
 | **before a power-on** | `instances stock --spec ID` exits 0 (a card is free) or 3 (none) | the agent | on 3 wait and ask again; a free card is a snapshot, the power-on can still be refused |
 | the allowance is spent (`over_quota`) | `ensure` says which limit | a person | raise it, or wait for tomorrow |
 

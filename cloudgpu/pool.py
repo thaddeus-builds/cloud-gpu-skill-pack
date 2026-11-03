@@ -29,6 +29,7 @@ line). With several boxes a take that waits in one box's line tries the next box
 
 from __future__ import annotations
 
+import inspect
 import os
 import re
 import socket
@@ -39,8 +40,8 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from . import hold, turns
-from .box import Box
-from .errors import CloudGpuError
+from .box import UP_TIMEOUT_S, Box
+from .errors import BoxStarting, CloudGpuError
 
 POOL_VAR = "CLOUDGPU_POOL"
 PIN_FILE = "cloudgpu_box"
@@ -66,6 +67,15 @@ def boxes_from(env, box_cls=Box) -> list:
         sub.update({"CLOUDGPU_" + k[len(pre):]: v for k, v in env.items() if k.startswith(pre)})
         out.append((n.lower(), box_cls(sub)))
     return out
+
+
+def _ensure_up_no_wait(box) -> None:
+    """`box.ensure_up(wait=False)`: a box that is on and booting raises BoxStarting at once instead of being waited for. A box object whose ensure_up has no `wait` (a consumer's own) is called as before."""
+    try:
+        takes = "wait" in inspect.signature(box.ensure_up).parameters
+    except (TypeError, ValueError):
+        takes = False
+    box.ensure_up(wait=False) if takes else box.ensure_up()
 
 
 class _Skip(Exception):
@@ -287,8 +297,9 @@ class Pool:
                     tk.wait()
             return
         last: CloudGpuError | None = None
+        starting: dict[str, tuple[float, BoxStarting]] = {}       # box name -> (when this take first saw it booting, what the adapter said): a ready box is taken at once, these are waited for only when none is
         while True:
-            held, queued = [], False
+            held, queued, booting = [], False, set()
             for name, box in sorted(self.boxes, key=lambda nb: self._free[nb[0]].inflight):      # the box with fewest takes of this machine first, the list's order on a tie
                 if pinned in names and name != pinned:
                     continue
@@ -304,11 +315,17 @@ class Pool:
                 try:
                     if pinned is None and self._recently_down(name):
                         raise _Skip()
-                    box.ensure_up()
+                    _ensure_up_no_wait(box)
                 except _Skip:
                     self._free[name].release()
                     continue
+                except BoxStarting as e:                        # on, and coming up: not down; the boxes after it in the pass are tried first
+                    self._free[name].release()
+                    booting.add(name)
+                    starting[name] = (starting[name][0] if name in starting else self._clock(), e)
+                    continue
                 except CloudGpuError as e:
+                    starting.pop(name, None)
                     self._down[name] = self._clock()
                     self._free[name].release()
                     if pinned is not None:                  # the box that holds the sent take: no other box can give its result back
@@ -328,6 +345,7 @@ class Pool:
                     queued = True
                     continue
                 self._down.pop(name, None)
+                starting.pop(name, None)
                 self._here.box = box
                 try:
                     out_dir.mkdir(parents=True, exist_ok=True)
@@ -340,10 +358,24 @@ class Pool:
                         tk.wait()
                     self._free[name].release()
                 return
+            for name in [n for n in starting if n not in booting]:      # only a box asked in this pass and still booting keeps its clock: one that is busy, held or skipped now may be up
+                del starting[name]
+            for name in list(starting):                         # a box that stays booting past the bound is down, with the adapter's reason
+                t0, e = starting[name]
+                if self._clock() - t0 > UP_TIMEOUT_S:
+                    del starting[name]
+                    self._down[name] = self._clock()
+                    last = CloudGpuError("timeout", f"the box {name} did not come up in {UP_TIMEOUT_S}s; the adapter answers and says {e.message}",
+                                         ["look at the box at its vendor; nothing was sent"], detail=e.detail)
+                    if pinned is not None:
+                        raise last
             if held:
                 self._announce(min(held, key=lambda h: h["until"]))
             elif queued:
                 pass
+            elif starting:                                      # no box is ready: wait (bounded) for the first of the booting ones; every pass asks all of them again
+                name, (_t0, e) = min(starting.items(), key=lambda kv: kv[1][0])
+                self._say("starting:" + name, f"waiting for {name or 'the box'}: {e.message}")
             elif last is not None and all(self._recently_down(n) for n in names) and not any(self._free[n].locked() for n in names):
                 raise last                                  # every box is down and none is busy: nothing will free up
             self._sleep(self.poll)

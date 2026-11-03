@@ -375,6 +375,60 @@ def test_a_box_with_a_backend_whose_adapter_says_starting_is_waited_for_without_
         a.srv.shutdown()
 
 
+def test_ensure_up_without_wait_says_starting_at_once_and_a_ready_box_is_taken_by_the_pool_while_another_boots():
+    from cloudgpu.errors import BoxStarting
+    from cloudgpu.pool import Pool
+    starting = FakeAdapter(comfy=False, services=_comfy("starting", "started 40 s ago"))
+    ready = FakeAdapter()
+    try:
+        env = {"CLOUDGPU_TOKEN": "t" * 30, "CLOUDGPU_POWER": "none"}
+
+        def nap(s):
+            raise AssertionError("no wait")
+        slow = Box({**env, "CLOUDGPU_BASE": starting.base}, sleep=nap)
+        with _t.raises("starting") as c:
+            slow.ensure_up(wait=False)
+        assert isinstance(c.err, BoxStarting) and c.err.detail == "comfy" and "ComfyUI is starting: started 40 s ago" in c.err.message, c.err.message
+        assert slow._ready is False and starting.asked == 1
+        with _t.tmpdir() as d:
+            a_box, b_box = Box({**env, "CLOUDGPU_BASE": starting.base}, sleep=nap), Box({**env, "CLOUDGPU_BASE": ready.base}, sleep=nap)
+            pool = Pool([("a", a_box), ("b", b_box)], poll=0.01, state_dir=d + "/state")
+            with pool.take(Path(d) / "t1") as taken:                   # a is first and idle but booting: b is ready and is taken, nothing is slept
+                assert taken is b_box
+            starting.comfy, starting.services = True, _comfy("up", "answers")
+            with pool.take(Path(d) / "t2") as taken:                   # a came up meanwhile: it is the first again
+                assert taken is a_box
+            starting.comfy, starting.services = False, _comfy("starting", "started 1 s ago")
+            ready.comfy, ready.services = False, _comfy("starting", "started 2 s ago")
+            polls = []
+
+            def came_up(s):                                            # nothing is ready: the pool polls until one of them is
+                polls.append(s)
+                if len(polls) == 3:
+                    ready.comfy, ready.services = True, _comfy("up", "answers")
+            pool = Pool([("a", Box({**env, "CLOUDGPU_BASE": starting.base}, sleep=nap)), ("b", Box({**env, "CLOUDGPU_BASE": ready.base}, sleep=nap))], poll=0.01, sleep=came_up,
+                        state_dir=d + "/state2", on_wait=lambda m: None)
+            with pool.take(Path(d) / "t3") as taken:
+                assert taken is pool.boxes[1][1] and len(polls) == 3, polls
+    finally:
+        starting.srv.shutdown()
+        ready.srv.shutdown()
+
+
+def test_ensure_up_without_wait_still_powers_on_a_box_that_is_off_as_before():
+    import cloudgpu.box as bx
+    real = bx.UP_TIMEOUT_S
+    bx.UP_TIMEOUT_S = 0.05
+    try:
+        with autodl_api(lambda m, path, b, q: "shutdown" if path.endswith("status") or "status" in path else {}) as calls:
+            b = Box({"CLOUDGPU_BASE": "http://127.0.0.1:1", "CLOUDGPU_TOKEN": "t" * 30, "CLOUDGPU_INSTANCE": "pro-1", "AUTODL_DEV_TOKEN": "dev"}, sleep=lambda s: time.sleep(0.02))
+            with _t.raises("timeout"):
+                b.ensure_up(wait=False)                                # the box does not answer: this is a boot, not a "starting" service
+            assert any(c[1] == "power_on" for c in calls) and b._powered, calls
+    finally:
+        bx.UP_TIMEOUT_S = real
+
+
 def test_the_status_reads_the_box_and_the_pass_and_never_prints_a_secret():
     a = FakeAdapter()
     listing = {"list": [{"uuid": "pro-1", "status": "running", "charge_type": "daily", "gpu_spec_uuid": "v-48g", "region_name": "x",

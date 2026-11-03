@@ -270,7 +270,7 @@ python3 -m cloudgpu instances stock --data-center westDC3 --spec v-48g --spec pr
 It prints one JSON document (`any_idle`, `rows` of `data_center`, `region`, `spec` (the id `instances specs` and a create request use; `null` for a card this package does not know), `card`, `idle`, `total`, and a note) and
 exits **0 when a card is free, 3 when none is, 1 on an error**, so it goes before a power-on: `instances stock --spec v-48g --data-center westDC3 && instances power-on ID --yes`.
 Read-only, and it needs no token and sends none (the developer token is refused on that call). Limits, said plainly: the call is the market page's own and not documented, so it can change or be limited (keep to one read a
-half minute); a free card now does not make a power-on succeed; whether an existing instance is tied to its own machine (so a free card elsewhere does not help it) was **not verified**; and every number seen
+half minute); a free card now does not make a power-on succeed; whether an existing instance is tied to its own machine (so a free card elsewhere does not help it) is **not verified**, but there is one sample for it (2026-11-03: the page showed 1 free PRO6000 in the northwest, and a power-on of an existing PRO6000 instance in that data center was refused at once with 暂无库存); and every number seen
 so far was 0 (2026-11-03), so that the anonymous count equals what a logged-in page shows is not verified either. `ServerBusy 服务正忙` now counts as no stock (`ensure` retries it, as it does `暂无库存`).
 
 ### Passes: the base, and the warning before one ends (0.16.0)

@@ -104,6 +104,7 @@ import subprocess
 import sys
 import threading
 import time
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -169,7 +170,8 @@ LOCK_MORE = {"official": {"VAEEncodeAudio": ("audio", "vae"), "SetLatentNoiseMas
                           "ImageFromBatch": ("image", "batch_index", "length")}}
 OFFICIAL_MIN_LENGTH = 124           # the model's trained range is 124..362 frames (5.2 .. 15.1 s): a shorter take is made 124 long and cut back
 LINE_MAX_CHARS = 400
-LINE_LANGUAGE = re.compile(r"[A-Za-z][A-Za-z \-]{1,23}")
+LINE_LANGUAGE = re.compile(r"[A-Za-z]{2,}(?:[ -][A-Za-z]+)*")          # a language name, at most 24 characters
+LINE_FORBIDDEN = frozenset('<>\uff1c\uff1e\u2039\u203a\u3008\u3009\u27e8\u27e9"\u201c\u201d\u201e\u201f\uff02\u00ab\u00bb\u300c\u300d\u300e\u300f\u301d\u301e')    # angle brackets and double-quote marks of every width
 OFFICIAL_PROMPT = (                 # the E3 prompt, three lines; the 2nd and 3rd are fixed
     "[Shot 1] <Subject 1> (S1) whose appearance comes from <Picture 1> looks into the lens and says, <d>[{language}] {line}</d>\n"
     "<Audio 1>: fully_copy - the original audio of <Audio 1> is the complete final track; <Subject 1> (S1) lip-syncs exactly to it.\n"
@@ -274,16 +276,17 @@ def official_length(seconds: float) -> int:
 
 def clean_line(line, language=None) -> tuple:
     """(line, language) for the official prompt, or Refused (`lock_line_required` / `lock_line_invalid`). The line goes between <d> and </d> on ONE line: no control character, no < or > (a tag of
-    its own), no quote mark (MiniMax's prompt guide: words in quotes are text to show on the picture, which is what this take must not have)."""
+    its own), no quote mark (MiniMax's prompt guide: words in quotes are text to show on the picture, which is what this take must not have). Control, format, separator and surrogate characters
+    (Unicode categories C* and Z*, the plain space apart) are refused too: they break the line or hide in it."""
     if not isinstance(line, str) or not line.strip():
         raise Refused("lock_line_required: lock=official builds its prompt from `line`, the words spoken in the audio (a non-empty string); it was not given")
     line = line.strip()
-    bad = next((c for c in line if ord(c) < 32 or ord(c) == 127 or c in '<>"\u201c\u201d\u201e'), None)
+    bad = next((c for c in line if c in LINE_FORBIDDEN or (c != " " and unicodedata.category(c)[0] in "CZ")), None)
     if bad is not None or len(line) > LINE_MAX_CHARS:
-        why = f"is over {LINE_MAX_CHARS} characters" if bad is None else f"has a character that is not allowed ({bad!r}: no line break, < >, or quote marks)"
+        why = f"is over {LINE_MAX_CHARS} characters" if bad is None else f"has a character that is not allowed ({bad!r}: no line break or invisible character, no < >, no quote marks)"
         raise Refused(f"lock_line_invalid: `line` {why}; give the spoken words as one plain line")
     language = "Chinese" if language is None else language
-    if not isinstance(language, str) or not LINE_LANGUAGE.fullmatch(language):
+    if not isinstance(language, str) or len(language) > 24 or not LINE_LANGUAGE.fullmatch(language):
         raise Refused("lock_line_invalid: `line_language` is the name of the spoken language in letters (default Chinese)")
     return line, language
 
@@ -301,6 +304,8 @@ def lock_official(g: dict, seconds: float) -> dict:
     audio half of the reference node's latent; the sampler regenerates the video and re-injects the clean audio at every step. The reference node keeps the audio as <Audio 1>. The video
     is cut to the audio's frames and the ORIGINAL audio goes into it (no decode). The reference node's `length` is E3's rule (official_length), the prompt is the request's."""
     ref = g["7"]["inputs"]
+    if any(k.startswith("5r") for k in g):                  # the extra pictures of the other locks: E3 has one, and a picture is never dropped silently
+        raise LockUnavailable("lock_one_picture: lock=official has one reference picture; the graph was given more")
     return {
         "1": g["1"],
         "2": g["20"],
@@ -708,7 +713,7 @@ def lock_words(lock: str, why: str, **kw) -> str:
                 f"sets {ENV_ALLOW_VRGDG}=1 for the adapter. Use lock=official (the default, core nodes only). Nothing was queued.")
     if why == "missing":
         where = ("it is a ComfyUI core node (comfy_extras.nodes_minimax_h3): update ComfyUI" if lock == "addguide"
-                 else "it is a ComfyUI core node: update ComfyUI (v0.35.0 or newer has the audio-video latent nodes this lock needs)" if lock == "official"
+                 else "it is a ComfyUI core node: update ComfyUI" if lock == "official"
                  else "it comes from the third-party custom-node pack comfyui-vrgamedevgirl: install it on the box image, pinned to a commit (docs/cloud-gpu.md)")
         return f"lock_node_missing: lock={lock} needs the node {node}, which this box's ComfyUI does not have ({where}). The take was not run and no other graph was used instead."
     if why == "incompatible":

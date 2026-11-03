@@ -351,7 +351,7 @@ default, and when 1.2 s of silence was put into the audio the model kept speakin
 
 **The workflow.** `minimax_h3_image_audio_locked` has the unlocked workflow's fields and validation (`ref_image_0` and, for the other two locks, `ref_image_1`..`ref_image_8`, `ref_audio_0`, `audio_duration` 1..15, `resolution`, `seed`) and `lock`. It builds
 the same model nodes from the same `models.json` names and the same size rules, and anchors the take's own audio. In every lock the audio is also the reference `<Audio 1>` (`ref_audios.ref_audio_0`), as the nodes' own descriptions ask.
-**Words:** with `official` (the default) the request carries `line`, the words spoken in the audio (one plain line, at most 400 characters, no line break, no `<` `>`, no quote marks), and optionally `line_language` (default `Chinese`); the adapter builds the whole prompt (below) and `prompt` is refused
+**Words:** with `official` (the default) the request carries `line`, the words spoken in the audio (one plain line, at most 400 characters, no line break or other invisible or control character, no `<` `>`, no double-quote marks of any width, `«»` and `「」` included), and optionally `line_language` (default `Chinese`); the adapter builds the whole prompt (below) and `prompt` is refused
 (`lock_prompt_unused`), because a prompt that is silently dropped is worse than an error. With `addguide` and `audiodrive` the prompt is the request's, word for word (no `prompt`: the unlocked workflow's default, which has no speech in it) and `line` is refused (`lock_line_unused`).
 
 | `lock` | the nodes | where they come from | what the operator measured (4090, 2026-11-03) |
@@ -370,7 +370,7 @@ the same model nodes from the same `models.json` names and the same size rules, 
   1. `[Shot 1] <Subject 1> (S1) whose appearance comes from <Picture 1> looks into the lens and says, <d>[Chinese] LINE</d>`
   2. `<Audio 1>: fully_copy - the original audio of <Audio 1> is the complete final track; <Subject 1> (S1) lip-syncs exactly to it.`
   3. `No captions, subtitles, logos or on-screen text appear.`
-- Model file names are not in the lock code: the loaders of the finished graph are used as they are, so the names, the steps and the seed come from the box's `models.json` (`detect_models.py` picks the `ref2v` turbo 4-step lora and the int8 text encoder when the image has them; the 4090 preset `models.4090.json` has exactly the names of the operator's run).
+- Model file names are not in the lock code: the loaders of the finished graph are used as they are, so the names, the steps and the seed come from the box's `models.json` (`detect_models.py` prefers the `ref2v` turbo 4-step lora and, on a card that is not Blackwell, takes the int8 text encoder; the 4090 preset `models.4090.json` has exactly the names of the operator's run. An adapter started with no `models.json` uses the built-in PRO6000 names, whose lora is the `fl2v` one, which is not what E3 ran with).
 - The nodes are found by name in ComfyUI's `/object_info` (all five, each with the inputs the graph wires); one missing or changed is `lock_node_missing` / `lock_node_incompatible` naming that node. The adapter does not read ComfyUI's version: to check a box by hand, `/system_stats` should say v0.35.0 or newer and `/object_info/LTXVConcatAVLatent` should describe the MiniMax H3 audio-video latent.
 - One reference picture only (`lock_one_picture` for more): the run had one and the prompt names only `<Picture 1>`.
 
@@ -392,7 +392,7 @@ still starting and then found without its node is `FAILED` with the same words, 
 | `lock_node_incompatible` | the node is there but its definition lacks an input the graph wires (a changed version): the message names the input |
 | `lock_state_unknown` | ComfyUI did not answer `/object_info` when the take ran |
 | `lock_line_required` | `lock: official` (the default) and `line` is missing or empty |
-| `lock_line_invalid` | `line` has a line break, `<` `>`, a quote mark or is over 400 characters, or `line_language` is not a language name in letters |
+| `lock_line_invalid` | `line` has a line break, an invisible or control character, `<` `>`, a double-quote mark or is over 400 characters, or `line_language` is not a language name in letters (single spaces or hyphens between words) |
 | `lock_prompt_unused` | `lock: official` and a `prompt` was sent (the adapter builds the prompt from `line`) |
 | `lock_line_unused` | `line` or `line_language` sent with `addguide` or `audiodrive` (they take `prompt`) |
 | `lock_one_picture` | `lock: official` and `ref_image_1` or more |

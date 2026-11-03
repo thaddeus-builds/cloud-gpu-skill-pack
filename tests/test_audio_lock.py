@@ -636,7 +636,8 @@ def test_the_official_prompt_is_the_three_e3_lines_and_the_line_is_the_only_thin
     assert l3 == "No captions, subtitles, logos or on-screen text appear."
     q = adapter.official_prompt("  Hello there.  ", "English")
     assert q.split("\n")[0].endswith("<d>[English] Hello there.</d>") and q.split("\n")[1:] == [l2, l3]
-    for bad in (None, "", "   ", 5, "two\nlines", "tab\there", "a <b> c", "x</d>y", 'says "hi"', "\u201chi\u201d", "x" * (adapter.LINE_MAX_CHARS + 1)):
+    for bad in (None, "", "   ", 5, "two\nlines", "tab\there", "a <b> c", "x</d>y", 'says "hi"', "\u201chi\u201d", "x" * (adapter.LINE_MAX_CHARS + 1),
+                "a\u2028b", "a\u2029b", "a\x85b", "a\x0bb", "a\xa0b", "a\u200bb", "a\u202eb", "a\ufeffb", "a\ud800b", "\uff1ca\uff1e", "\u2039a\u203a", "\u300ca\u300d", "\u00aba\u00bb", "\uff02a"):
         try:
             adapter.official_prompt(bad)
         except adapter.Refused as e:
@@ -644,13 +645,26 @@ def test_the_official_prompt_is_the_three_e3_lines_and_the_line_is_the_only_thin
         else:
             raise AssertionError(f"line {bad!r} was accepted")
     assert adapter.official_prompt("x" * adapter.LINE_MAX_CHARS)
-    for bad in ("", "Chi\nnese", "<d>", "x", "a" * 30, 3, "Chinese]"):
+    for ok in ("don't stop, it's fine.", "你好，世界！", "Hello \u2014 world\u2026"):
+        assert adapter.official_prompt(ok), "apostrophes, CJK punctuation and dashes are plain speech"
+    for bad in ("", "Chi\nnese", "<d>", "x", "a" * 30, 3, "Chinese]", "English ", " English", "Eng  lish", "Pt--BR", "-English"):
         try:
             adapter.official_prompt("hi", bad)
         except adapter.Refused as e:
             assert str(e).startswith("lock_line_invalid:"), (bad, str(e))
         else:
             raise AssertionError(f"language {bad!r} was accepted")
+
+
+def test_the_official_graph_never_drops_an_extra_picture_silently():
+    with Models(PRESET_4090):
+        try:
+            build("official", extra_images=["b.png"])
+        except adapter.LockUnavailable as e:
+            assert str(e).startswith("lock_one_picture:")
+        else:
+            raise AssertionError("an extra picture vanished from the official graph")
+    assert "0.35" not in adapter.lock_words("official", "missing"), "the runtime error states no ComfyUI version the code did not check"
 
 
 def test_the_default_lock_is_official_and_its_request_carries_the_line_not_a_prompt():

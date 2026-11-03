@@ -299,7 +299,7 @@ class Pool:
         last: CloudGpuError | None = None
         starting: dict[str, tuple[float, BoxStarting]] = {}       # box name -> (when this take first saw it booting, what the adapter said): a ready box is taken at once, these are waited for only when none is
         while True:
-            held, queued = [], False
+            held, queued, booting = [], False, set()
             for name, box in sorted(self.boxes, key=lambda nb: self._free[nb[0]].inflight):      # the box with fewest takes of this machine first, the list's order on a tie
                 if pinned in names and name != pinned:
                     continue
@@ -321,6 +321,7 @@ class Pool:
                     continue
                 except BoxStarting as e:                        # on, and coming up: not down; the boxes after it in the pass are tried first
                     self._free[name].release()
+                    booting.add(name)
                     starting[name] = (starting[name][0] if name in starting else self._clock(), e)
                     continue
                 except CloudGpuError as e:
@@ -357,6 +358,8 @@ class Pool:
                         tk.wait()
                     self._free[name].release()
                 return
+            for name in [n for n in starting if n not in booting]:      # only a box asked in this pass and still booting keeps its clock: one that is busy, held or skipped now may be up
+                del starting[name]
             for name in list(starting):                         # a box that stays booting past the bound is down, with the adapter's reason
                 t0, e = starting[name]
                 if self._clock() - t0 > UP_TIMEOUT_S:

@@ -403,6 +403,32 @@ def test_a_box_that_stays_starting_past_the_bound_times_out_with_the_adapters_re
         pl.UP_TIMEOUT_S = real
 
 
+def test_a_booting_box_that_is_not_asked_in_a_pass_does_not_keep_an_old_clock():
+    import cloudgpu.pool as pl
+    now = [0.0]
+    real = pl.UP_TIMEOUT_S
+    pl.UP_TIMEOUT_S = 100
+    try:
+        with _t.tmpdir() as d:
+            a, b = BootingBox(boots=1), BootingBox(boots=None)               # both boot; a comes up and another take of this process then keeps it
+            pool = booting_pool(a, b, clock=lambda: now[0])
+            held = []
+
+            def tick(s):
+                now[0] += 60
+                if not held:
+                    pool._free["a"].acquire()                                # a is up but busy now: it is not asked, its old `booting` entry must not age into a "down"
+                    held.append(1)
+                elif now[0] > 150 and held == [1]:
+                    pool._free["a"].release()
+                    held.append(2)
+            pool._sleep = tick
+            with pool.take(Path(d) / "t1") as box:
+                assert box is a and not pool._recently_down("a")
+    finally:
+        pl.UP_TIMEOUT_S = real
+
+
 def test_a_box_that_is_down_is_skipped_with_its_reason_while_a_ready_one_takes_the_take_and_a_starting_one_does_not_hide_a_down_one():
     with _t.tmpdir() as d:
         a, b = BootingBox(up=False), BootingBox(boots=0)

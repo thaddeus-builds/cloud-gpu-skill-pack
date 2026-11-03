@@ -285,7 +285,9 @@ class Steward:
                     plan["allowance"] = "covers one more"
                 except CloudGpuError as e:
                     plan["allowance"] = e.message
-            return {**out, **plan, "missing": short if short > 0 else 0, "next": ["pass --yes to do it"] + notes}
+            refused = [i for i, c in plan.get("budget_checks", {}).items() if "would_refuse" in c]
+            go = ["the budget gate would refuse " + ", ".join(refused) + (" (and nothing else is left to open)" if len(refused) == len(plan["would_power_on"]) else "") + ": --yes will not open it; wait for tomorrow, or raise --budget-cny"] if refused else []
+            return {**out, **plan, "missing": short if short > 0 else 0, "next": (go or ["pass --yes to do it"]) + notes}
         fails: dict[tuple, dict] = {}
 
         def fail(what: str, where: str, e: CloudGpuError) -> None:

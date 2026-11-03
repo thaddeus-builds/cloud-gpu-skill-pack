@@ -190,6 +190,8 @@ def test_the_ensure_dry_run_says_the_cap_the_budget_and_where_it_would_create_if
         assert [o["data_center"] for o in r["order"]] == ["westDC3", "beijingDC2"] and r["if_a_power_on_is_refused_for_no_stock"] and not any(c[0] in ("power_on", "create") for c in cloud.calls)
         r2 = stew(d, cloud).ensure(1, TEMPLATE, specs=["v-48g"], centers=["westDC3"], yes=False, instances=["pro-a"], max_minutes=21, budget=0.5)
         assert "would_refuse" in r2["budget_checks"]["pro-a"]
+        assert "budget gate would refuse pro-a" in r2["next"][0] and "pass --yes" not in r2["next"][0]
+        assert r["next"][0] == "pass --yes to do it"
 
 
 if __name__ == "__main__":

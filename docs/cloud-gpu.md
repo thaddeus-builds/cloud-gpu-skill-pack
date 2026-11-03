@@ -257,6 +257,22 @@ stays "no such call": said, never guessed), the normalising of its answers into 
 test it offline against the documented answers (copy `tests/test_vendors.py`). The power backend, the CLI, the status check and the skill then work for it with no other change.
 A vendor with no API at all needs nothing: `CLOUDGPU_POWER=none`. A call never runs a command taken from a file or the environment.
 
+### Free cards now: `instances stock` (0.17.0)
+
+autodl's developer API has no call for free cards, so a power-on is the only way to find out, and an afternoon of refusals is common (2026-11-03: the same instance, every try, `InternalError 当前算力规格暂无库存`
+and `ServerBusy 服务正忙` alternating). The public market page (https://www.autodl.art/app/market) shows `(free/total)` on each card; `instances stock` reads the call behind it:
+
+```
+python3 -m cloudgpu instances stock                          # every card in every data center: free and total
+python3 -m cloudgpu instances stock --data-center westDC3 --spec v-48g --spec pro6000-p
+```
+
+It prints one JSON document (`any_idle`, `rows` of `data_center`, `region`, `spec` (the id `instances specs` and a create request use; `null` for a card this package does not know), `card`, `idle`, `total`, and a note) and
+exits **0 when a card is free, 3 when none is, 1 on an error**, so it goes before a power-on: `instances stock --spec v-48g --data-center westDC3 && instances power-on ID --yes`.
+Read-only, and it needs no token and sends none (the developer token is refused on that call). Limits, said plainly: the call is the market page's own and not documented, so it can change or be limited (keep to one read a
+half minute); a free card now does not make a power-on succeed; whether an existing instance is tied to its own machine (so a free card elsewhere does not help it) was **not verified**; and every number seen
+so far was 0 (2026-11-03), so that the anonymous count equals what a logged-in page shows is not verified either. `ServerBusy 服务正忙` now counts as no stock (`ensure` retries it, as it does `暂无库存`).
+
 ### Passes: the base, and the warning before one ends (0.16.0)
 
 The base capacity is **passes** (daily, weekly or monthly boxes) that **a person buys and renews in the vendor's console**; this package cannot do either (autodl's API only creates pay-as-you-go

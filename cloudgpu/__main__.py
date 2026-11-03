@@ -41,13 +41,15 @@ def instances(a, out=print) -> int:
         if c == "specs":
             out(json.dumps(v.gpu_specs(), ensure_ascii=False))
             return 0
-        if not v.configured() and c != "create":
+        if not v.configured() and c not in ("create", "stock"):
             raise CloudGpuError("key_missing", f"the {name} vendor needs {v.token_env}")
         if c == "list":
             listing = v.all()
             prow = {r["id"]: r for r in expiry.rows(listing, vendor=v.name, days=_days(a))}
             out(json.dumps([{**i.as_dict(), **({"pass": prow[i.id]} if i.id in prow else {})} for i in listing], ensure_ascii=False))
             _say(expiry.alerts(prow.values()))
+        elif c == "stock":
+            return stock_cmd(a, v, out)
         elif c == "expiry":
             rs = expiry.account_rows(v, only=set(a.ids) or None, days=_days(a))
             doc = {"warn_days": _days(a), "level": expiry.worst(rs), "passes": rs, "alerts": [r["message"] for r in expiry.alerts(rs)]}
@@ -119,6 +121,23 @@ def instances(a, out=print) -> int:
     except CloudGpuError as e:
         out(json.dumps({"error": e.message, "kind": e.kind, "next": e.next, **({"status": e.status} if e.status is not None else {})}, ensure_ascii=False))
         return 1
+
+
+def stock_cmd(a, v, out) -> int:
+    """`instances stock`: the free cards the vendor shows now, per data center. Read only, no token. Exit 0 when a card is free, 3 when none is (put it before a power-on), 1 on an error."""
+    from datetime import datetime, timezone
+    from .errors import CloudGpuError
+    rows = v.stock(a.data_center or None)
+    if a.spec:
+        known = {r["spec"] for r in rows if r["spec"]}
+        lost = [s for s in a.spec if s not in known and s not in v.gpu_specs()]
+        if lost:
+            raise CloudGpuError("unknown", f"unknown spec {', '.join(lost)}: one of {', '.join(v.gpu_specs())}")
+        rows = [r for r in rows if r["spec"] in a.spec]
+    free = any((r["idle"] or 0) > 0 for r in rows)
+    out(json.dumps({"at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "any_idle": free, "rows": rows,
+                    "note": "a snapshot of the vendor's market page: a free card now does not make a power-on succeed (an instance may be tied to its own machine)"}, ensure_ascii=False))
+    return 0 if free else 3
 
 
 def _days(a) -> float:
@@ -236,6 +255,9 @@ def main(argv: list[str] | None = None) -> int:
     ie.add_argument("ids", nargs="*", help="only these instances (default: every pass of the account)")
     ie.add_argument("--warn-days", type=float, help="warn this many days before a pass ends (default CLOUDGPU_PASS_WARN_DAYS, else 3)")
     isub.add_parser("specs")
+    iq = isub.add_parser("stock", help="free cards per data center now (read only, no token); exit 0 a card is free, 3 none is, 1 an error")
+    iq.add_argument("--data-center", action="append", default=[], help="a data center id (default: all the vendor has); repeatable")
+    iq.add_argument("--spec", action="append", default=[], help="only this card spec id (v-48g, pro6000-p ...); repeatable")
     for c in ("status", "snapshot", "power-on", "power-off", "release"):
         q = isub.add_parser(c)
         q.add_argument("id")

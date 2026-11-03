@@ -12,6 +12,11 @@
     POST .../pro/power_off {instance_uuid}
     POST .../pro/release {instance_uuid}             shut it down first
 
+Free cards (read 2026-11-03 from the public market page https://www.autodl.art/app/market, NOT the developer API, which has no stock call): an anonymous web call that takes no token
+(the developer token is refused there: AuthorizeFailed) and is not documented, so it can change or be limited:
+    POST /api/v1/adl_server/machine_pro/gpu_type    {data_center_list: ["westDC3"]}  -> data[]: gpu_type, user_define_name, gpu_idle_num, gpu_total_number
+Several data centers in one request come back added together, so one request is made per data center. 0 total means that data center has no such card.
+
 `status`, `snapshot` and `list` are called with a query string (the body form the page shows answers RequestParameterIsWrong; checked 2026-10-22). Prices: `payg_price` 6980 is
 ¥6.98 per hour (checked against the console 2026-10-23: PRO6000 ¥6.98, list ¥7.35 = origin_pay_price 7350), so the unit is 0.001 CNY per hour. A pass instance's snapshot says `payg_price` 0 (checked on a day pass,
 2026-10-23): the pass's price is not in it, so a pass's cost is the console's, not this API's.
@@ -33,10 +38,14 @@ API = "https://www.autodl.art/api/v1/adl_dev/dev/instance/pro"
 # the appendix's table (page name -> API spec id), plus a spec seen on a real instance (6000d) that the appendix does not list
 GPU_SPECS = {"h800": "H800-80G", "v-48g": "4090-48G", "pro6000-p": "PRO6000-96G", "v-32g-p": "4080(S)-32G", "v-48g-350w": "3090-48G", "5090-p": "5090-32G",
              "6000d": "6000D-84G (seen on an instance; not in the appendix)"}
+# the market page's card name for each spec id above (gpu_type in the stock answer)
+GPU_TYPES = {"h800": "H800", "v-48g": "vGPU-48GB", "pro6000-p": "RTX PRO 6000", "v-32g-p": "vGPU-32GB", "v-48g-350w": "vGPU-48GB-350W", "5090-p": "RTX 5090", "6000d": "RTX 6000D"}
+MARKET = "https://www.autodl.art/api/v1/adl_server/machine_pro"
 DATA_CENTERS = {"westDC3": "northwest", "beijingDC2": "beijing"}
 PASS = ("daily", "weekly", "monthly")
 NO_STOCK_WORDS = ("stocknotenough", "out of stock", "no stock", "sold out", "soldout", "no available gpu", "no gpu available", "no free gpu",
                   "库存不足", "库存", "资源不足", "没有空闲", "无空闲", "无可用", "没有可用", "资源紧张", "售罄", "卡不够")
+NO_STOCK_WORDS += ("serverbusy", "服务正忙")          # seen 2026-11-03 alternating with 当前算力规格暂无库存 on the same instance all afternoon; a retry is the only thing to do either way
 NOT_STOCK_WORDS = ("balance", "余额", "欠费", "funds", "quota", "配额", "arrears", "unauthor", "forbidden", "rights", "token", "permission", "权限", "disk", "磁盘")      # a missing balance or right is not a missing card
 
 
@@ -71,6 +80,37 @@ class AutoDL(Vendor):
         if doc.get("code") != "Success":
             raise CloudGpuError("http", f"autodl api {path}: {doc.get('code')} {doc.get('msg')}", status=doc.get("code"), detail=str(doc.get("msg", "")))
         return doc.get("data")
+
+    def _market(self, path: str, body: dict):
+        """An anonymous POST to the market page's read calls: no token is sent (it would be refused), the redirect guard stays on."""
+        r = urllib.request.Request(f"{MARKET}/{path}", data=json.dumps(body).encode(), method="POST",
+                                   headers={"Content-Type": "application/json;charset=UTF-8", "Accept": "application/json", "Origin": "https://www.autodl.art",
+                                            "Referer": "https://www.autodl.art/app/market", "User-Agent": "cloudgpu (read only)"})
+        try:
+            with net.urlopen(r, timeout=20) as resp:
+                doc = json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            raise CloudGpuError("http", f"autodl market {path} -> HTTP {e.code}", status=e.code, detail=e.read().decode(errors="replace")[:300]) from None
+        except (urllib.error.URLError, OSError) as e:
+            raise CloudGpuError("http", f"autodl market {path}: {e}", status="network", detail=str(e)[:200]) from None
+        except (ValueError, http.client.HTTPException):
+            raise CloudGpuError("http", f"autodl market {path}: the request failed or the answer was not JSON", status="network") from None
+        if doc.get("code") != "Success":
+            raise CloudGpuError("http", f"autodl market {path}: {doc.get('code')} {doc.get('msg')}", status=doc.get("code"), detail=str(doc.get("msg", "")))
+        return doc.get("data")
+
+    def stock(self, data_centers=None):
+        names = list(data_centers) if data_centers else list(DATA_CENTERS)
+        bad = [d for d in names if d not in DATA_CENTERS]
+        if bad:
+            raise CloudGpuError("unknown", f"unknown data center {', '.join(bad)}: one of {', '.join(DATA_CENTERS)}")
+        spec_of = {t: s for s, t in GPU_TYPES.items()}
+        rows = []
+        for dc in names:                                  # one request each: several in one would come back added together
+            for r in self._market("gpu_type", {"data_center_list": [dc]}) or []:
+                rows.append({"data_center": dc, "region": DATA_CENTERS[dc], "spec": spec_of.get(r.get("gpu_type")), "card": r.get("user_define_name") or r.get("gpu_type"),
+                             "gpu_type": r.get("gpu_type"), "idle": r.get("gpu_idle_num"), "total": r.get("gpu_total_number")})
+        return rows
 
     # ---- reading ----
     @staticmethod

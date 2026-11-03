@@ -1,8 +1,8 @@
 """A person's hold on a box: "do not start takes on this box until HH:MM". One small JSON file per box in the state directory
 (`CLOUDGPU_STATE_DIR`, else `~/.cloudgpu`), so it works across processes and restarts, and ends by itself at its time.
 
-    python3 -m cloudgpu hold BOX --minutes 60 --who NAME --why "manual test"
-    python3 -m cloudgpu release BOX
+    openmax-cloudgpu hold BOX --minutes 60 --who NAME --why "manual test"
+    openmax-cloudgpu release BOX
 
 `Pool.take` treats a held box as busy and `Pool.power_off_if_idle` leaves it on. A hold governs callers that go through `Pool`: someone who talks to ComfyUI directly is not stopped.
 BOX is the name in `CLOUDGPU_POOL`, or `default` for a pool of one. Nothing here names a caller; `who` and `why` are free text for the next person to read."""
@@ -90,7 +90,7 @@ def place(sd: Path, box: str, minutes: float, who: str, why: str = "", now: floa
     cur = get(sd, box, now)
     if cur and cur["who"] != who:
         raise CloudGpuError("key_missing", f"{box_key(box)} is already held by {cur['who']} until {clock(cur['until'])}",
-                            [f"ask {cur['who']}, or release it (python3 -m cloudgpu release {box_key(box)}) if it is stale"])
+                            [f"ask {cur['who']}, or release it (openmax-cloudgpu release {box_key(box)}) if it is stale"])
     path.parent.mkdir(parents=True, exist_ok=True)
     doc = {"who": who, "why": why, "since": now, "until": now + minutes * 60}
     tmp = path.with_name(path.name + f".{os.getpid()}.tmp")

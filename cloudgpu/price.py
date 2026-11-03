@@ -1,4 +1,4 @@
-"""What a second of video costs on a box, from its recorded runs: `python3 -m cloudgpu price [--box ID] [--format json|tsv]`.
+"""What a second of video costs on a box, from its recorded runs: `openmax-cloudgpu price [--box ID] [--format json|tsv]`.
 
 `cloudgpu/data/runs.jsonl` holds one line per measured take: box, card, hourly_cny (the box's price per hour), workflow, resolution, seconds (of
 video), machine_s (seconds the machine took: the adapter's own task record, `started` to `finished`), `cold: true` on the first take after a

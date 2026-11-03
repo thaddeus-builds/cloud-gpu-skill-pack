@@ -1,4 +1,4 @@
-"""Submit one take to a box and time it: `python3 -m cloudgpu bench ENVFILE NAME WORKFLOW RES SECONDS IMAGE [AUDIO]`.
+"""Submit one take to a box and time it: `openmax-cloudgpu bench ENVFILE NAME WORKFLOW RES SECONDS IMAGE [AUDIO]`.
 
 ENVFILE holds the settings (CLOUDGPU_BASE and CLOUDGPU_TOKEN, KEY=value lines). WORKFLOW is minimax_h3_image_audio_to_video (needs AUDIO) or
 minimax_h3_lightx2v (Mode A: the still is the first and last frame). RES is 480p竖, 768p竖, 480p横 or 768p横. Writes NAME.mp4 in the current folder and prints one JSON

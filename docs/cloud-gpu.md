@@ -9,7 +9,7 @@ costs nothing or about thirty lines; everything else (the adapter, its queue, th
 | how the box is reached | `CLOUDGPU_BASE` (a public address) or the SSH tunnel the package opens by key (`CLOUDGPU_SSH_KEY`, `CLOUDGPU_SSH`) | nothing: any vendor with SSH works; a vendor that exposes a port can use it |
 | how it is powered, and the cloud account | a **cloud vendor** (`cloudgpu/vendors/`: list, status, snapshot, power, create, release) and the power backend built on it, chosen by `CLOUDGPU_POWER`: **`autodl` is built in and the default**, `none` | `none` fits an always-on box, a pass, or a vendor with no API; with an API, write one `Vendor` (below) |
 | which model files the image carries | `cloudgpu/detect_models.py` reads them off the box into `models.json` | nothing: it matches exact file names, in any folder layout |
-| what a second of video costs | price rows per box, `<workflow>@<resolution>#<box>`, from recorded runs (`python3 -m cloudgpu price`) | run the bench on the box, record the runs |
+| what a second of video costs | price rows per box, `<workflow>@<resolution>#<box>`, from recorded runs (`openmax-cloudgpu price`) | run the bench on the box, record the runs |
 
 ## What it costs and what it does (measured 2026-10-23, one take at a time, models warm)
 
@@ -38,7 +38,7 @@ autodl.art's own workflow catalog, peak / off-peak, ¥ per second of video.
 ## Set up a box
 
 1. Rent an instance from an image that already carries H3 in ComfyUI (a shared model pool on the vendor's side means no download); note its SSH line.
-2. `python3 -m cloudgpu bundle` makes `cloudgpu-box.tgz` (the adapter, the detector, `install.sh`, `tunnel.sh`, the two verified model presets). `scp` it to the box,
+2. `openmax-cloudgpu bundle` makes `cloudgpu-box.tgz` (the adapter, the detector, `install.sh`, `tunnel.sh`, the two verified model presets). `scp` it to the box,
    `tar xzf` it, and run `sh install.sh auto 6009 < token-file` (a 24+ character secret). `auto` runs `detect_models.py`, which reads the image's files and picks, by
    exact name, the models for this card (the nvfp4 text encoder needs a Blackwell GPU, every other card takes the int8 one); it names what is missing and writes
    nothing then. install.sh needs only a python and curl, works in `$CLOUDGPU_DIR` (default `~/h3host`, the folder name the first boxes got), and installs a systemd unit
@@ -82,7 +82,7 @@ AUTODL_DEV_TOKEN=…          the autodl backend: the account's developer token 
 
 The older `H3HOST_<NAME>` names are read second, and only when the new name is absent: a key that is present wins even when empty (`CLOUDGPU_AUTOOFF=` is off, it does not fall through
 to `H3HOST_AUTOOFF`). Values are stripped of surrounding whitespace (a token read from a file keeps no newline). A consumer loads its own `.env` into the environment, or passes a
-mapping: `Box(env)`; `python3 -m cloudgpu status --env-file FILE` and `bench` read a file and warn when other users can read it (chmod 600).
+mapping: `Box(env)`; `openmax-cloudgpu status --env-file FILE` and `bench` read a file and warn when other users can read it (chmod 600).
 On the box, `start.sh` also takes `CLOUDGPU_BIND` (default 127.0.0.1), `CLOUDGPU_PUBLIC_BASE`, and leaves an adapter that has a take on it running (it restarts only at `busy` 0).
 
 ## Use it from code
@@ -113,7 +113,7 @@ clips, 768x1344, 90 frames, 6 steps); the adapter's own run of it has not been m
 `GET /health` (no token) answers `{"ok", "comfy", "busy", "worker": "alive"|"dead", "card", "memory_mib", "vram_free_mib", "voice", "files", "t2v"}` and, when asked with `?nonce=`, a `proof`. `ok` is false when the worker thread is dead. `busy` counts
 a take from the moment it is accepted (while its inputs are still being fetched) until it is over **and collected** (the video downloaded, or the failure read), or 300 s after it finished.
 `card` is the GPU the box runs on, as `nvidia-smi` names it with its memory (`NVIDIA GeForce RTX 4090, 49140 MiB`; `unknown` when it cannot say); `memory_mib` is the first card's memory as a number (`null` when unknown), so a consumer can check the size without parsing text: compare it with the box you declared
-(`CLOUDGPU_BOX`); `python3 -m cloudgpu status` does and says so in `next` when they differ. `vram_free_mib` is the free memory of ComfyUI's first device as ComfyUI itself reports it (`null` when ComfyUI is down or does not say), so a consumer can see whether a second model fits
+(`CLOUDGPU_BOX`); `openmax-cloudgpu status` does and says so in `next` when they differ. `vram_free_mib` is the free memory of ComfyUI's first device as ComfyUI itself reports it (`null` when ComfyUI is down or does not say), so a consumer can see whether a second model fits
 before it loads it. `voice` is true when the box has the voice installed; `t2v` is true when it serves `minimax_h3_t2v`. From 0.7.0 a caller waiting in the box's line also counts in `busy`.
 
 Errors are `CloudGpuError` with `kind`: `key_missing` (a setting or a key file is not right), `http` (a vendor API answered no), `unknown` (not a backend), `down` (the box
@@ -171,14 +171,14 @@ earlier runs on the box that holds it and on no other: only that box can give it
 A person who needs a box for an hour (a test, a manual run) says so, and takes through the `Pool` stay off it:
 
 ```
-python3 -m cloudgpu hold BOX --minutes 60 --who NAME --why "manual test"     # BOX: the name in CLOUDGPU_POOL, or default for a pool of one
-python3 -m cloudgpu release BOX
+openmax-cloudgpu hold BOX --minutes 60 --who NAME --why "manual test"     # BOX: the name in CLOUDGPU_POOL, or default for a pool of one
+openmax-cloudgpu release BOX
 ```
 
 A hold is one small file per box in `CLOUDGPU_STATE_DIR` (default `~/.cloudgpu/holds/`), so it works across processes and restarts and **ends by itself at its time** (at most 480 minutes; someone
 else's active hold is not replaced, your own is extended). `Pool.take` counts a held box as busy and uses another; when every box it may use is held (a pool of one, or a take sent earlier that must
 return to its box) it waits, saying `waiting for the hold on BOX by NAME until HH:MM` once on stderr (or through `Pool(on_wait=fn)`), and goes when the hold ends. The default `on_wait` (stderr) says a wait at once and then one line per `wait_say_every_s` (default 180 s) with the wait so far (`... (still waiting, 200 s)`); a function passed as `on_wait` gets every change of the text, as before. `Pool.power_off_if_idle` leaves a held
-box on. `python3 -m cloudgpu status` lists the active holds. **Limit:** a hold governs callers that go through `Pool`; someone who talks to ComfyUI directly is not stopped, and a hold on a box
+box on. `openmax-cloudgpu status` lists the active holds. **Limit:** a hold governs callers that go through `Pool`; someone who talks to ComfyUI directly is not stopped, and a hold on a box
 does not stop a take already running on it. 
 
 ### A line for the takes of one machine (0.5.0)
@@ -186,7 +186,7 @@ does not stop a take already running on it.
 Two processes (two jobs, or a job and a person's run) that both see a free box no longer both send. Every take through `Pool.take` takes a **ticket** in `<CLOUDGPU_STATE_DIR>/turns/` and goes
 when it is the oldest waiting take that may use a box that is free (nothing running on it), not held, and comes up; a take pinned to one box (a result to fetch) waits in the line for that box only.
 A ticket is alive while its owner holds an `flock` on it, so a take that dies, however it dies, leaves no stale ticket and never blocks the line. A take that waits says so once
-(`waiting for its turn: take-3 (pid 4121) is running on a`), and `python3 -m cloudgpu status` lists the line (`queue`: state, box, pid, take folder, since) and adds a line to `next` for each.
+(`waiting for its turn: take-3 (pid 4121) is running on a`), and `openmax-cloudgpu status` lists the line (`queue`: state, box, pid, take folder, since) and adds a line to `next` for each.
 **Limits:** this line is per machine and per state directory (callers on different machines use the box's own line, next section), and two pools of different physical boxes that share a
 state directory and box names would wait on each other (give each set its own `CLOUDGPU_STATE_DIR`). Without `fcntl` (Windows) or a state directory that cannot be written there is no line and a take
 goes as in 0.4.
@@ -244,9 +244,9 @@ shows answers `RequestParameterIsWrong`). A create request is checked offline ag
 required fields, no stray field) before anything is sent.
 
 ```
-python3 -m cloudgpu instances list | status ID | snapshot ID | specs      # reading: free, no secret printed
-python3 -m cloudgpu instances power-on ID | power-off ID | release ID      # a dry run that says what it would do, until --yes
-python3 -m cloudgpu instances create --spec request.json                   # the same: a dry run until --yes
+openmax-cloudgpu instances list | status ID | snapshot ID | specs      # reading: free, no secret printed
+openmax-cloudgpu instances power-on ID | power-off ID | release ID      # a dry run that says what it would do, until --yes
+openmax-cloudgpu instances create --spec request.json                   # the same: a dry run until --yes
 ```
 
 Everything that changes the account is a dry run until `--yes`, which only a person gives (by convention; see "Who may power a box"): **`create` starts billing, `release` destroys the instance's data** (and it refuses an
@@ -263,8 +263,8 @@ autodl's developer API has no call for free cards, so a power-on is the only way
 and `ServerBusy 服务正忙` alternating). The public market page (https://www.autodl.art/app/market) shows `(free/total)` on each card; `instances stock` reads the call behind it:
 
 ```
-python3 -m cloudgpu instances stock                          # every card in every data center: free and total
-python3 -m cloudgpu instances stock --data-center westDC3 --spec v-48g --spec pro6000-p
+openmax-cloudgpu instances stock                          # every card in every data center: free and total
+openmax-cloudgpu instances stock --data-center westDC3 --spec v-48g --spec pro6000-p
 ```
 
 It prints one JSON document (`any_idle`, `rows` of `data_center`, `region`, `spec` (the id `instances specs` and a create request use; `null` for a card this package does not know), `card`, `idle`, `total`, and a note) and
@@ -282,6 +282,26 @@ and reads the status until the vendor itself says `shutdown` (a refused request,
 
 Limits, said plainly: the guard is a process on this machine, so a machine that is switched off or a guard that is killed shuts nothing (the vendor's balance is the other stop); it shuts the box down even if a take is running (a hard cap is that); and it was
 tested offline against a fake vendor, **not yet against a real box**: the first real use should be watched.
+
+### A day's budget and a kept box: `--budget-cny`, `ensure --instance` (0.20.0)
+
+Also asked for by the remote agent on 2026-11-03, on top of the hard cap above:
+
+```
+openmax-cloudgpu instances power-on ID --yes --max-minutes 21 --budget-cny 5
+openmax-cloudgpu instances ensure --count 1 --spec t.json --specs pro6000-p --data-centers westDC3,beijingDC2 --instance pro-793376 --max-minutes 21 --budget-cny 5 --yes
+```
+
+- **`--budget-cny X`** (needs `--max-minutes`): refuses a power-on, or an `ensure` create, when today's runs plus this one would pass X. Today's runs are the hours the ledger shows *run*, not the instances that exist (that is the
+  allowance's `max_cny_per_day`, an upper bound and a different number): a run starts at a `create` or `power-on` line and ends at the next `power-off`, `release` or `gone`, at the price per hour on the line (the account's snapshot, else
+  the allowance's `--price`; a box whose price is not known is refused). A run with a cap is **set aside to its deadline** when it starts, so the next power-on in the same minute sees those hours. A box turned off in the vendor's console
+  writes no line, so it counts until its deadline: an upper bound, never an under-count. A guard that could not shut the box writes `guard-failed`, and the box counts as running from then on. The refusal says the three numbers; the day is the local day.
+  A pass is neither gated nor capped. The count is of this machine's ledger (`CLOUDGPU_STATE_DIR`): another machine's runs are not in it.
+- **`ensure --instance ID`** (repeatable; `CLOUDGPU_ENSURE_INSTANCES`, comma separated): boxes of the account that a person rents and keeps but that are neither wired in the settings nor made by the ledger. They are counted and **powered on
+  first**; when one cannot open ("no stock": on 2026-11-03 a free card in the zone did not open a stopped instance, which looks tied to its own machine), `ensure` creates in the order asked for in the same round. An id the account does not
+  list is reported in `not_in_account` and in `next`.
+- **One line out.** `power-on` prints one JSON line: `done`, `id`, `started_at`, `price_cny_per_hour`, `auto_off_at`, `max_minutes`, `guard`, and with a budget `spent_today_cny`, `would_add_cny`, `budget_cny`. `ensure` gives the same per box in `runs`.
+- The guard of a box this agent did not make (a wired or named one) is started without `--agent`, which would refuse it; switching a box off is the safe direction.
 
 ### Passes: the base, and the warning before one ends (0.16.0)
 
@@ -301,11 +321,11 @@ What the package does for a pass is notice and name it (`cloudgpu/expiry.py`). F
 
 A pay-as-you-go instance never has a state: it has no end. Each message names the instance (id and name), the end time, and who acts. Where it shows:
 
-- `python3 -m cloudgpu instances list` still prints the same JSON list, with a `pass` object on each pass; the warnings are lines on stderr (`WARN: ...`, `ERROR: ...`). `--warn-days N` overrides the setting.
-- `python3 -m cloudgpu instances status ID` adds the same `pass` for that instance.
-- `python3 -m cloudgpu instances expiry [ID ...] [--warn-days N]` is the check for a script or a cron: every pass of the account (or the ones named), `level`, `alerts`; **exit 0** well (or only `off`),
+- `openmax-cloudgpu instances list` still prints the same JSON list, with a `pass` object on each pass; the warnings are lines on stderr (`WARN: ...`, `ERROR: ...`). `--warn-days N` overrides the setting.
+- `openmax-cloudgpu instances status ID` adds the same `pass` for that instance.
+- `openmax-cloudgpu instances expiry [ID ...] [--warn-days N]` is the check for a script or a cron: every pass of the account (or the ones named), `level`, `alerts`; **exit 0** well (or only `off`),
   **1** one ends soon, **2** one has ended.
-- `python3 -m cloudgpu status` (the box wired in the settings) puts the message in `next` and the whole row in `account.expiry`.
+- `openmax-cloudgpu status` (the box wired in the settings) puts the message in `next` and the whole row in `account.expiry`.
 - `instances ensure` puts a message in `next` for every wired pass that ends soon or has ended, and the rows in `passes`. A pass that is off and has not ended is powered on before any hourly box
   (it costs nothing more); one that has ended or gives no end time is left to a person.
 - A consumer's health check calls `expiry.account_rows(vendor, env, only=wired_ids)` and shows each row's `message` (the `level` says error or warning); `only` keeps a pass nobody uses from nagging.
@@ -322,7 +342,7 @@ never blocks the line, and while any ticket is live `/health` counts the box as 
 
 `Pool.take` does this by itself: once a take is the one for a free box on its own machine and the box is up, it takes a ticket on the box and goes when the box says "go"; a thread asks about the ticket
 every 20 s while the take runs and the ticket is given up at the end. With several boxes a take that waits on one box's line tries the next, keeps its place where it waits, and gives up the others when it
-goes. It says `waiting for its turn on BOX: 2 take(s) of other machines ahead (host/take-3 is running)` once on stderr (or through `on_wait`), and `python3 -m cloudgpu status` adds `line` (state, label, age) from the box.
+goes. It says `waiting for its turn on BOX: 2 take(s) of other machines ahead (host/take-3 is running)` once on stderr (or through `on_wait`), and `openmax-cloudgpu status` adds `line` (state, label, age) from the box.
 **Limits:** the line orders callers that use it. An adapter older than 0.7.0 (reinstall it with `bundle` and `install.sh`), a line that does not answer, or a caller that sends a take without a ticket is not stopped
 and not waited for: the take goes as before, and the adapter's own queue still serves it in order of arrival. The line is in the adapter's memory: an adapter restart forgets it (a restart already fails every
 waiting take), and a caller whose ticket was forgotten joins again at the back. A ticket's label (this machine's name and the take's folder name) is sent to the box. A hold (above) is still per machine. Out of scope, as before:
@@ -351,7 +371,7 @@ A box whose adapter was edited by hand to add these two sizes is overwritten by 
 ## How much a box works: `util` (0.14.0)
 
 A consumer's own wall clock cannot say whether the box is the bottleneck: a take that took 143 s on the consumer's side may have been 40 s on the box, with a new one reaching it only every few minutes.
-`python3 -m cloudgpu util [--since TIME] [BOX...]` reads each box's task records and prints, per box and workflow, the number of takes and how many failed, the time from creation to done (median and
+`openmax-cloudgpu util [--since TIME] [BOX...]` reads each box's task records and prints, per box and workflow, the number of takes and how many failed, the time from creation to done (median and
 slowest, of the takes that went well), the median and mean gap between consecutive creations, the busy share (the part of the span, first creation to last finish, in which a take was running on the
 box), and the takes of the last 30 minutes. `TIME` is `90m`, `2h`, `1d`, a local date or date and time (`2026-10-29T14:30`) or seconds since 1970, so a change on the consumer's side can be judged by
 running it before and after. `BOX` is a name in `CLOUDGPU_POOL` (`default` for a pool of one); none means all. The JSON is on stdout (one row per box and workflow, or a row with an `error` for a box that
@@ -366,11 +386,11 @@ older one `util` says so. The statistics are `cloudgpu.util.report(records, now,
 By default an agent rents nothing: `create` and `release` are a person's, as above. A person can give an agent a limit to work inside, and then the agent may keep boxes up by itself.
 
 ```
-python3 -m cloudgpu quota set --by NAME --max-instances 2 --max-cny-per-day 100 --price v-48g=3.2 --price pro6000-p=7   # a person; --by and the time are recorded
-python3 -m cloudgpu quota show                                                                                        # free: the numbers, who set them, what is spent today
-python3 -m cloudgpu instances create --agent --spec request.json [--yes]    # inside the allowance, or refused with the reason; a dry run says which
-python3 -m cloudgpu instances release --agent ID [--yes]                    # only an instance this agent created, shut down, not wired in the settings
-python3 -m cloudgpu instances ensure --count 2 --spec template.json [--specs v-48g,pro6000-p] [--data-centers westDC3,beijingDC2] [--patience 600] [--yes]
+openmax-cloudgpu quota set --by NAME --max-instances 2 --max-cny-per-day 100 --price v-48g=3.2 --price pro6000-p=7   # a person; --by and the time are recorded
+openmax-cloudgpu quota show                                                                                        # free: the numbers, who set them, what is spent today
+openmax-cloudgpu instances create --agent --spec request.json [--yes]    # inside the allowance, or refused with the reason; a dry run says which
+openmax-cloudgpu instances release --agent ID [--yes]                    # only an instance this agent created, shut down, not wired in the settings
+openmax-cloudgpu instances ensure --count 2 --spec template.json [--specs v-48g,pro6000-p] [--data-centers westDC3,beijingDC2] [--patience 600] [--yes]
 ```
 
 - **The allowance** is a file (`~/.cloudgpu/quota.json`, `CLOUDGPU_QUOTA_FILE`, beside it the ledger, `CLOUDGPU_STATE_DIR`). No file, or a 0, means the agent creates nothing. Numbers: how many
@@ -415,7 +435,7 @@ starts by itself), wait until the account says `running`, read the SSH door and 
 | the adapter token (`CLOUDGPU_TOKEN`) | **no** | a secret: a person pipes it |
 | wire it to the settings (`CLOUDGPU_<NAME>_INSTANCE`, `_SSH`, `_BASE`, `_TOKEN`) | **no** | the settings are the operator's |
 | the voice service (VoxCPM, port 8190) | **no** | adcut's `docs/voxcpm.md`; not copied here |
-| `python3 -m cloudgpu status` says `ready`, one measured take, a price confirmed | **no** | a paid take and a price are a person's |
+| `openmax-cloudgpu status` says `ready`, one measured take, a price confirmed | **no** | a paid take and a price are a person's |
 
 The way to make the first row cover the rest: set one box up once by hand, put the restricted key in its `authorized_keys`, install the adapter and the voice service, save it as a private image,
 and use that image as `application_uuid` in the template (whether AutoDL gives a saved image an application uuid that `create` takes has **not** been checked here: ask in the console before relying on it).
@@ -437,8 +457,8 @@ A box made from it then needs only the settings wired and `status` run.
 
 ## Measure and price a new box
 
-1. `python3 -m cloudgpu bench ENVFILE NAME WORKFLOW RES SECONDS IMAGE [AUDIO]` submits one take (**a paid take**: the box's hours, and it powers nothing on by itself; there is no `--yes`
+1. `openmax-cloudgpu bench ENVFILE NAME WORKFLOW RES SECONDS IMAGE [AUDIO]` submits one take (**a paid take**: the box's hours, and it powers nothing on by itself; there is no `--yes`
    and no tty check, so only a person runs it) and prints the wall time; run each take twice (the first loads the models). The machine's own time is in the box's `~/h3host/tasks/*.json` (`started`, `finished`).
 2. Append the warm runs to `cloudgpu/data/runs.jsonl` (box, card, `hourly_cny`, workflow, resolution, seconds, `machine_s`; `cold: true` on the first). Never edit a run.
-3. `python3 -m cloudgpu price --box ID [--format tsv] [--provider NAME]` prints the rows (the worst warm run of each workflow and resolution, at full use). The package writes
+3. `openmax-cloudgpu price --box ID [--format tsv] [--provider NAME]` prints the rows (the worst warm run of each workflow and resolution, at full use). The package writes
    nothing: your project turns them into its price table, as pending until a person confirms.

@@ -16,13 +16,15 @@ tests/              python3 tests/run.py (offline: a fake ComfyUI stands in for 
 ```
 
 ```
-python3 -m cloudgpu status          # where the box stands, read only
-python3 -m cloudgpu util --since 2h  # how much each box works, from its task records, read only
-python3 -m cloudgpu instances list  # the cloud account (autodl): list, status, snapshot; power, create, release only with --yes
-python3 -m cloudgpu quota show      # the allowance an agent may rent boxes inside (0 until a person sets it); instances ensure --count N
-python3 -m cloudgpu hold BOX --minutes 60 --who NAME   # keep takes off a box for a while (release BOX ends it)
-python3 -m cloudgpu bundle          # cloudgpu-box.tgz: what to copy onto a box
-python3 -m cloudgpu price --box rtx4090 --format tsv
+# pip install . gives the command openmax-cloudgpu (the playbook's name, R19) and its short form cloudgpu; python3 -m cloudgpu is the same without installing
+openmax-cloudgpu status          # where the box stands, read only
+openmax-cloudgpu util --since 2h  # how much each box works, from its task records, read only
+openmax-cloudgpu instances list  # the cloud account (autodl): list, status, snapshot; power, create, release only with --yes
+openmax-cloudgpu instances power-on ID --yes --max-minutes 21 --budget-cny 5   # a hard stop (a guard shuts it down and checks) and a day's budget gate
+openmax-cloudgpu quota show      # the allowance an agent may rent boxes inside (0 until a person sets it); instances ensure --count N
+openmax-cloudgpu hold BOX --minutes 60 --who NAME   # keep takes off a box for a while (release BOX ends it)
+openmax-cloudgpu bundle          # cloudgpu-box.tgz: what to copy onto a box
+openmax-cloudgpu price --box rtx4090 --format tsv
 ```
 
 ```python

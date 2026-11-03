@@ -83,7 +83,8 @@ class FakeComfy:
                 if outer.mode == "fail":
                     outer.done[pid] = {"status": {"completed": False, "status_str": "error", "messages": [["execution_error", {"exception_message": "CUDA out of memory"}]]}}
                 else:
-                    prefix = g["16"]["inputs"]["filename_prefix"]
+                    save = next(k for k, n in g.items() if n["class_type"] == "SaveVideo")          # node 16 in the base graph, 21 in the official lock's
+                    prefix = g[save]["inputs"]["filename_prefix"]
                     out = outer.root / "output" / Path(prefix).parent
                     out.mkdir(parents=True, exist_ok=True)
                     name = Path(prefix).name + "_00001_.mp4"
@@ -93,7 +94,7 @@ class FakeComfy:
                     else:
                         (out / name).write_bytes(b"fakemp4")
                     outer.done[pid] = {"status": {"completed": True, "status_str": "success"},
-                                       "outputs": {"16": {"images": [{"filename": name, "subfolder": Path(prefix).parent.as_posix(), "type": "output"}], "animated": [True]}}}
+                                       "outputs": {save: {"images": [{"filename": name, "subfolder": Path(prefix).parent.as_posix(), "type": "output"}], "animated": [True]}}}
                 self._j(200, {"prompt_id": pid})
 
         self.srv = ThreadingHTTPServer(("127.0.0.1", 0), H)

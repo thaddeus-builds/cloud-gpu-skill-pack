@@ -6,10 +6,11 @@
 # Variables: CLOUDGPU_DIR (default $HOME/h3host: the folder name the first boxes got; START_COMMAND in box.py is its start.sh), CLOUDGPU_COMFY_ROOT (default $HOME/ComfyUI), CLOUDGPU_PYTHON (default: the first python found),
 # CLOUDGPU_TTS_DIR / CLOUDGPU_TTS_PYTHON (IndexTTS2's checkpoints folder and the Python of its environment, when they are not found by themselves: the voice is optional),
 # CLOUDGPU_PUBLIC_BASE (https://host:port the callers reach it at, when the vendor exposes a port) and CLOUDGPU_BIND (default 127.0.0.1: all the SSH tunnel needs; 0.0.0.0 only for a
-# vendor's public port). start.sh does not restart an adapter that has a take running. A systemd unit is installed when the box runs
+# vendor's public port), CLOUDGPU_ALLOW_NODE_VRGDG (unset or empty = off, the default; 1 = the owner allows the third-party audiodrive lock, see docs/cloud-gpu.md; the value given here is start.sh's default, and a value set when start.sh runs, 0 or empty included, wins). start.sh does not restart an adapter that has a take running. A systemd unit is installed when the box runs
 # systemd, so the adapter starts at boot; a container without it relies on the vendor's power-on hook running $CLOUDGPU_DIR/start.sh.
 set -e
 MODELS="${1:?models: auto | a json file}"; PORT="${2:-6009}"
+case "${CLOUDGPU_ALLOW_NODE_VRGDG:-}" in *[!A-Za-z0-9]*) echo "CLOUDGPU_ALLOW_NODE_VRGDG must be letters and digits only (1 switches the third-party audiodrive lock on, empty or 0 leaves it off)" >&2; exit 1;; esac
 HERE="$(cd "$(dirname "$0")" && pwd)"
 D="${CLOUDGPU_DIR:-$HOME/h3host}"; ROOT="${CLOUDGPU_COMFY_ROOT:-$HOME/ComfyUI}"
 PY="${CLOUDGPU_PYTHON:-}"
@@ -42,6 +43,14 @@ if [ -f "$HERE/tts_worker.py" ] && [ -f "$HERE/detect_models.py" ]; then
     echo "voice: IndexTTS2 not found on this box (optional; CLOUDGPU_TTS_DIR and CLOUDGPU_TTS_PYTHON name it)"
   fi
 fi
+# The audio-lock nodes (0.20.0) are only reported, never installed or fetched by this script: the official lock's node is part of ComfyUI, and the third-party pack
+# (comfyui-vrgamedevgirl, under a licence that is not open) is the owner's decision. The adapter serves its lock only with CLOUDGPU_ALLOW_NODE_VRGDG=1, which is NOT set by default.
+if [ -f "$HERE/detect_models.py" ]; then
+  "$PY" "$HERE/detect_models.py" --comfy-root "$ROOT" --nodes-only --text 2>/dev/null || true
+fi
+if [ -n "${CLOUDGPU_ALLOW_NODE_VRGDG:-}" ]; then
+  echo "audio lock: CLOUDGPU_ALLOW_NODE_VRGDG=$CLOUDGPU_ALLOW_NODE_VRGDG is written into start.sh as this adapter's default (third-party node, licence-restricted: only the owner decides; 1 switches the audiodrive lock on)"
+fi
 ( umask 077; cat > "$D/token" )
 [ "$(tr -d '\r\n' < "$D/token" | wc -c)" -ge 24 ] || { echo "the token is shorter than 24 characters" >&2; exit 1; }
 cat > "$D/start.sh" <<EOS
@@ -55,7 +64,7 @@ fi
 pkill -f "$D/server.py" 2>/dev/null || true
 cd "$D"
 S=""; command -v setsid >/dev/null 2>&1 && S=setsid
-CLOUDGPU_TOKEN="\$(cat "$D/token")" CLOUDGPU_PUBLIC_BASE="\${CLOUDGPU_PUBLIC_BASE:-${CLOUDGPU_PUBLIC_BASE:-}}" CLOUDGPU_BIND="\${CLOUDGPU_BIND:-${CLOUDGPU_BIND:-}}" \$S nohup "$PY" "$D/server.py" --port $PORT --comfy-root "$ROOT" --state "$D" --models "$D/models.json" $TTSFLAGS > "$D/server.log" 2>&1 < /dev/null &
+CLOUDGPU_TOKEN="\$(cat "$D/token")" CLOUDGPU_PUBLIC_BASE="\${CLOUDGPU_PUBLIC_BASE:-${CLOUDGPU_PUBLIC_BASE:-}}" CLOUDGPU_BIND="\${CLOUDGPU_BIND:-${CLOUDGPU_BIND:-}}" CLOUDGPU_ALLOW_NODE_VRGDG="\${CLOUDGPU_ALLOW_NODE_VRGDG-${CLOUDGPU_ALLOW_NODE_VRGDG:-}}" \$S nohup "$PY" "$D/server.py" --port $PORT --comfy-root "$ROOT" --state "$D" --models "$D/models.json" $TTSFLAGS > "$D/server.log" 2>&1 < /dev/null &
 sleep 2; curl -s "127.0.0.1:$PORT/health"; echo
 EOS
 chmod 700 "$D/start.sh"

@@ -17,6 +17,7 @@ import threading
 import time
 import types
 import urllib.error
+import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -37,6 +38,9 @@ class FakeComfy:
     def __init__(self, root: Path, mode="ok"):
         self.root, self.mode, self.graphs, self.done, self.calls = root, mode, [], {}, []
         self.stats = {"system": {}}
+        self.nodes: dict = {}               # node class -> the description /object_info/<node> answers; a node not in it answers {} as ComfyUI does
+        self.object_info_fail = False       # True: /object_info answers 500 (ComfyUI is up but cannot say)
+        self.gets: list = []                # every GET path
         outer = self
 
         class H(BaseHTTPRequestHandler):
@@ -51,8 +55,14 @@ class FakeComfy:
                 self.wfile.write(b)
 
             def do_GET(self):
+                outer.gets.append(self.path)
                 if self.path == "/system_stats":
                     return self._j(200, outer.stats)
+                if self.path.startswith("/object_info/"):
+                    if outer.object_info_fail:
+                        return self._j(500, {})
+                    name = urllib.parse.unquote(self.path[len("/object_info/"):])
+                    return self._j(200, {name: outer.nodes[name]} if name in outer.nodes else {})
                 if self.path.startswith("/history/"):
                     pid = self.path.rsplit("/", 1)[-1]
                     return self._j(200, {pid: outer.done[pid]} if pid in outer.done else {})

@@ -14,8 +14,8 @@ can import indextts.infer_v2 were found, else null; --tts-out FILE writes it as 
 
 The audio-lock nodes (0.20.0) are reported too, and never make a box "missing" anything: `nodes` says whether the third-party custom-node pack comfyui-vrgamedevgirl (the one
 that holds the audiodrive lock's node) is in ComfyUI's custom_nodes folder and which commit it is on, read from its .git folder without running git. It is a report of what is
-installed, not a licence decision: the adapter serves that lock only when the operator sets CLOUDGPU_ALLOW_NODE_VRGDG=1 (docs/cloud-gpu.md). The official lock's node, MiniMaxH3AddGuide,
-belongs to ComfyUI itself and is found by the adapter in ComfyUI's /object_info when it runs. --nodes-only prints just this (JSON, or --text for the lines install.sh shows).
+installed, not a licence decision: the adapter serves that lock only when the operator sets CLOUDGPU_ALLOW_NODE_VRGDG=1 (docs/cloud-gpu.md). The default lock ("official", 0.21.0) and the
+addguide lock use ComfyUI's own core nodes (LTXVConcatAVLatent and four more; MiniMaxH3AddGuide) and are found by the adapter in ComfyUI's /object_info when it runs. --nodes-only prints just this (JSON, or --text for the lines install.sh shows).
 """
 
 from __future__ import annotations
@@ -174,7 +174,7 @@ def find_nodes(comfy_root: Path) -> dict:
 
 def nodes_text(nodes: dict) -> str:
     """The lines install.sh shows about the lock nodes."""
-    lines = ["audio lock: the official lock (MiniMaxH3AddGuide) is a ComfyUI core node; the adapter looks for it in ComfyUI when it starts and says in /health (audio_lock)"]
+    lines = ["audio lock: the official lock (the default: LTXVConcatAVLatent and four more ComfyUI core nodes; addguide: MiniMaxH3AddGuide) is part of ComfyUI; the adapter looks for the nodes in ComfyUI when it starts and says in /health (audio_lock)"]
     for lock, n in nodes.items():
         if n["present"]:
             lines.append(f"audio lock {lock}: pack {n['pack']} is installed ({'commit ' + n['commit'] if n['commit'] else 'commit unknown: not a git checkout'}); {n['note']}")

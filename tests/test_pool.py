@@ -9,7 +9,7 @@ from pathlib import Path
 import _t
 
 from cloudgpu import hold
-from cloudgpu.errors import CloudGpuError
+from cloudgpu.errors import BoxStarting, CloudGpuError
 from cloudgpu.pool import PIN_FILE, Pool, boxes_from
 
 
@@ -319,6 +319,111 @@ def test_only_the_first_take_on_a_box_takes_a_place_in_its_line_and_the_cross_pr
         for t in threads:
             t.join(5)
         assert box.leaves >= 1
+
+
+class BootingBox(FakeBox):
+    """A box whose service reads `starting` for `boots` more asks (None: for ever), then is up. `ensure_up(wait=False)` says so at once, as `Box` does; `ensure_up()` would wait."""
+    def __init__(self, boots=None, up=True):
+        super().__init__(up=up)
+        self.boots, self.waited = boots, 0
+
+    def ensure_up(self, need=("comfy",), *, wait=True):
+        self.ups += 1
+        if not self.up:
+            raise CloudGpuError("down", "the box does not answer")
+        if self.boots is None or self.boots > 0:
+            if self.boots is not None:
+                self.boots -= 1
+            if wait:
+                self.waited += 1                                            # the old behaviour: blocked here while a ready box of the pool sat idle
+            raise BoxStarting("ComfyUI is starting: started 40 s ago", detail="comfy")
+
+
+def booting_pool(*boxes, **kw):
+    kw.setdefault("state_dir", tempfile.mkdtemp(prefix="cloudgpu-state-"))
+    return Pool([(n, b) for n, b in zip("abc", boxes)], poll=0.01, **kw)
+
+
+def test_a_ready_box_is_taken_at_once_while_another_box_of_the_pool_is_still_starting():
+    with _t.tmpdir() as d:
+        a, b = BootingBox(boots=None), BootingBox(boots=0)
+        pool = booting_pool(a, b)                                           # a is first in the list and has the same load, but it is booting
+        with pool.take(Path(d) / "t1") as box:
+            assert box is b and a.waited == 0 and b.ups == 1
+        assert (Path(d) / "t1" / PIN_FILE).read_text() == "b"
+        assert "a" not in pool._down                                        # booting is not down: it is asked again by the next take
+        with pool.take(Path(d) / "t2") as box:
+            assert box is b and a.ups == 2
+
+
+def test_when_no_box_is_ready_the_take_waits_for_the_one_that_is_starting_and_then_takes_it():
+    with _t.tmpdir() as d:
+        said = []
+        a, b = BootingBox(boots=5), BootingBox(up=False)                    # a is up after 5 more asks, b is down
+        pool = booting_pool(a, b, on_wait=said.append)
+        with pool.take(Path(d) / "t1") as box:
+            assert box is a and a.ups == 6 and a.waited == 0
+        assert said and "ComfyUI is starting" in said[0] and said[0].startswith("waiting for a"), said
+        c, e = BootingBox(boots=3), BootingBox(boots=1)                     # two booting: the first of them to come up is taken
+        pool = booting_pool(c, e)
+        with pool.take(Path(d) / "t2") as box:
+            assert box is e
+
+
+def test_a_box_that_stays_starting_past_the_bound_times_out_with_the_adapters_reason_and_is_marked_down():
+    import cloudgpu.pool as pl
+    now = [0.0]
+    real = pl.UP_TIMEOUT_S
+    pl.UP_TIMEOUT_S = 100
+    try:
+        with _t.tmpdir() as d:
+            a = BootingBox(boots=None)
+            pool = booting_pool(a, BootingBox(up=False), clock=lambda: now[0], sleep=lambda s: now.__setitem__(0, now[0] + 30))      # b is down: a is the only hope
+            with _t.raises("timeout") as c:
+                with pool.take(Path(d) / "t1"):
+                    pass
+            assert "did not come up in 100s" in c.err.message and "ComfyUI is starting: started 40 s ago" in c.err.message, c.err.message
+            assert pool._recently_down("a") and not any(l.locked() for l in pool._free.values())
+            now[0] = 0.0
+            a2, b2 = BootingBox(boots=None), BootingBox(boots=None)         # two stuck boxes: both are named, the take ends when the last one times out
+            pool = booting_pool(a2, b2, clock=lambda: now[0], sleep=lambda s: now.__setitem__(0, now[0] + 30))
+            with _t.raises("timeout"):
+                with pool.take(Path(d) / "t2"):
+                    pass
+            assert a2.waited == 0 and b2.waited == 0
+            now[0] = 0.0
+            out = Path(d) / "t3"                                            # a take sent earlier waits for its own box only, and times out the same way
+            out.mkdir()
+            (out / PIN_FILE).write_text("b")
+            pool = booting_pool(BootingBox(boots=0), BootingBox(boots=None), clock=lambda: now[0], sleep=lambda s: now.__setitem__(0, now[0] + 30))
+            with _t.raises("timeout"):
+                with pool.take(out, sent=lambda o: True):
+                    pass
+    finally:
+        pl.UP_TIMEOUT_S = real
+
+
+def test_a_box_that_is_down_is_skipped_with_its_reason_while_a_ready_one_takes_the_take_and_a_starting_one_does_not_hide_a_down_one():
+    with _t.tmpdir() as d:
+        a, b = BootingBox(up=False), BootingBox(boots=0)
+        pool = booting_pool(a, b)
+        with pool.take(Path(d) / "t1") as box:
+            assert box is b and pool._recently_down("a")
+        down, boot = BootingBox(up=False), BootingBox(boots=2)              # down + starting: the down one is skipped, the starting one is waited for
+        pool = booting_pool(down, boot)
+        with pool.take(Path(d) / "t2") as box:
+            assert box is boot
+        both = booting_pool(BootingBox(up=False), BootingBox(up=False))
+        with _t.raises("down"):
+            with both.take(Path(d) / "t3"):
+                pass
+
+
+def test_a_consumers_box_whose_ensure_up_has_no_wait_argument_is_called_as_before():
+    with _t.tmpdir() as d:
+        pool, boxes = pool_of(True, True)                                   # FakeBox.ensure_up(self): no `wait`
+        with pool.take(Path(d) / "t1") as box:
+            assert box is boxes[0][1]
 
 
 def test_the_state_directory_comes_from_the_setting():

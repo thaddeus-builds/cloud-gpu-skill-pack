@@ -15,7 +15,7 @@ import urllib.request
 from collections.abc import Mapping
 
 from . import config, files, line, net, tunnel
-from .errors import CloudGpuError
+from .errors import BoxStarting, CloudGpuError
 from .power import HOURLY_BILLING, NO_ACCOUNT_HINT, Power, backend
 
 START_COMMAND = "/root/h3host/start.sh"          # a path on the box: written by onbox/install.sh (its folder is ~/h3host); a vendor's power-on hook runs it
@@ -185,15 +185,17 @@ class Box:
             tunnel.parse_ssh(f"{host}:{port}")
         return self._spawn(tunnel.argv(key, user, host, port, local, remote, known))
 
-    def ensure_up(self, need: tuple[str, ...] = ("comfy",)) -> None:
+    def ensure_up(self, need: tuple[str, ...] = ("comfy",), *, wait: bool = True) -> None:
         """Return when the box answers /health with every service in `need` up (default ComfyUI; "voxcpm" for a caller that speaks): open the tunnel when it is configured,
         and power the box on first when it is off and a backend can. By design this powers a box on WITHOUT asking a person: who may power boxes on is decided by whoever holds
         the account's token and CLOUDGPU_INSTANCE (the operator team), not by an agent or a customer, so a caller that must not cost money does not give the process those two.
         The `--yes` gate belongs to the CLI (`instances power-on`), which a person runs. With CLOUDGPU_AUTOOFF the box is powered off at exit, but only when THIS process powered it on.
         A box whose adapter answers and says a needed service is `starting` (0.22.0: ComfyUI takes 2 to 3 minutes after a boot) is waited for, up to UP_TIMEOUT_S, polling every 10 s,
-        with no power call (it is on); with `CLOUDGPU_POWER=none` a needed service that is `down` or `absent` is refused at once with the adapter's own reason."""
+        with no power call (it is on); with `CLOUDGPU_POWER=none` a needed service that is `down` or `absent` is refused at once with the adapter's own reason.
+        `wait=False` (0.22.2; the pool uses it so a ready box is not held up by one that is booting): that wait is not entered, `BoxStarting` is raised at once with the adapter's reason;
+        a box that must be powered on is still powered on and waited for as before."""
         with self._up:
-            need = _check_need(need)
+            need, may_wait = _check_need(need), wait             # `wait` is the list of services not up below
             if self._ready and set(need) <= self._ready_for and self.reprove():
                 return
             self.tunnel()
@@ -205,7 +207,11 @@ class Box:
                 if pw.name == "none":
                     self._refuse_if_stopped(h, wait)                 # the adapter says why a service will not come: nothing here can start it
                 if _only_starting(h, wait):
-                    pass                                             # the box is on and the adapter says it is coming up: nothing to power on, only to wait
+                    if not may_wait:
+                        coming = [(n, st, r) for n, st, r in wait if st == "starting"]
+                        raise BoxStarting("; ".join(f"{LABEL[n]} is {st}" + (f": {r}" if r else "") for n, st, r in coming),
+                                          ["wait for it, or call ensure_up() to wait"], detail=coming[0][0])
+                    # the box is on and the adapter says it is coming up: nothing to power on, only to wait
                 elif pw.name == "none" or pw.status() in OFF_STATUS:     # a box that is starting (or whose state is unknown) is waited for, not powered on again
                     pw.power_on(START_COMMAND)               # `none` refuses with what a person must do
                     self._powered = True

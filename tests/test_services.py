@@ -1171,5 +1171,33 @@ def test_a_reason_on_a_widened_bind_has_no_folder_names_and_a_launcher_search_sk
         assert services.find_voxcpm_launcher({}, Path(d) / "h3", {"CLOUDGPU_SERVICES_SEARCH": str(base)})[0] == base / "voxcpm-svc" / "start.sh"
 
 
+def test_a_comfy_command_from_the_environment_still_finds_a_copy_started_by_hand_with_the_usual_line():
+    with world(comfy_cfg={"delay": 2.5}) as w:
+        hand = subprocess.Popen([sys.executable, "main.py", "--listen", "127.0.0.1", "--port", str(w.comfy_port)], cwd=str(w.root), stdout=subprocess.DEVNULL)
+        try:
+            time.sleep(0.8)
+            wrapper = f"sh -c 'exec {sys.executable} main.py --listen 127.0.0.1 --port {w.comfy_port}'"        # a wrapper: its argv is not the line of the process it starts
+            out = w.up(CLOUDGPU_COMFY_CMD=wrapper, CLOUDGPU_COMFY_ROOT=str(w.root))
+            assert len(w.launches("comfy")) == 1, ("a second copy was started", out)
+            assert any("waited for, not started again" in x for x in out), out
+        finally:
+            hand.kill()
+            hand.wait()
+
+
+def test_a_comfy_command_from_the_environment_still_finds_a_copy_started_by_hand_with_the_usual_line():
+    with world(comfy_cfg={"delay": 2.5}) as w:
+        hand = subprocess.Popen([sys.executable, "main.py", "--listen", "127.0.0.1", "--port", str(w.comfy_port)], cwd=str(w.root), stdout=subprocess.DEVNULL)
+        try:
+            time.sleep(0.8)
+            wrapper = f"sh -c 'exec {sys.executable} main.py --listen 127.0.0.1 --port {w.comfy_port}'"        # a wrapper: its argv is not the line of the process it starts
+            out = w.up(CLOUDGPU_COMFY_CMD=wrapper, CLOUDGPU_COMFY_ROOT=str(w.root))
+            assert len(w.launches("comfy")) == 1, ("a second copy was started", out)
+            assert any("waited for, not started again" in x for x in out), out
+        finally:
+            hand.kill()
+            hand.wait()
+
+
 if __name__ == "__main__":
     _t.main(globals())

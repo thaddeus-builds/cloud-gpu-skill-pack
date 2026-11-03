@@ -190,9 +190,10 @@ def find_comfy_python(cfg: dict, root: Path) -> tuple[str | None, list]:
     if cfg.get("comfy_python"):
         return cfg["comfy_python"], []
     cands = [str(root / "venv" / "bin" / "python"), str(root / ".venv" / "bin" / "python")]
+    cands += [os.path.expanduser("~/miniconda3/bin/python"), "/root/miniconda3/bin/python"]
     if cfg.get("python_hint"):
         cands.append(cfg["python_hint"])
-    cands += [os.path.expanduser("~/miniconda3/bin/python"), "/root/miniconda3/bin/python", sys.executable, shutil.which("python3") or "", shutil.which("python") or "", "/opt/conda/bin/python"]
+    cands += [sys.executable, shutil.which("python3") or "", shutil.which("python") or "", "/opt/conda/bin/python"]
     tried = []
     for c in cands:
         if not c or c in tried or not os.path.isfile(c):
@@ -208,7 +209,7 @@ def find_voxcpm_launcher(cfg: dict, d: Path, env=None) -> tuple[Path | None, lis
     if cfg.get("voxcpm_dir"):
         dirs.append(Path(os.path.expanduser(cfg["voxcpm_dir"])))
     for b in [d] + search_bases(d, env):
-        dirs += [c for c in children(b) if "voxcpm" in c.name.lower()]
+        dirs += [c for c in children(b) if "voxcpm" in c.name.lower() and not re.search(r"bak|backup|old|tmp|orig|copy", c.name.lower())]
     tried = []
     for p in dirs:
         for name in LAUNCHERS:
@@ -219,24 +220,78 @@ def find_voxcpm_launcher(cfg: dict, d: Path, env=None) -> tuple[Path | None, lis
     return None, tried
 
 
+PY_RUN = r"^(\S*/)?(python[\d.]*|Python)\s+(\S+\s+)*?"      # `python [anything]` before the script: -X utf8, -u, -m ...
+
+
+def launcher_texts(launcher: Path) -> list:
+    """The launcher's text and, one level down, the texts of the sibling .sh scripts it names (a start.sh that calls an inner script)."""
+    out = []
+    try:
+        text = launcher.read_text(errors="replace")[:50000]
+    except OSError:
+        return out
+    out.append(text)
+    for m in re.finditer(r"(?<![\w.-])([\w.-]+\.sh)\b", text):
+        sib = launcher.parent / m.group(1)
+        if sib != launcher and sib.is_file() and len(out) < 4:
+            try:
+                out.append(sib.read_text(errors="replace")[:50000])
+            except OSError:
+                pass
+    return out
+
+
 def launcher_match(launcher: Path) -> str:
     """A regex that recognises the service a launcher script starts, for the check that runs BEFORE the launcher is called (a launcher may kill the copy it finds and start another,
-    as the operator's start.sh does with the pid in svc.pid): a process that runs the launcher's path, or runs one of the .py files its text mentions (voxcpm_service.py ...), either
-    directly or as the script of a Python (`python [-flags] [dir/]name.py`). A command line that merely mentions the name (an editor, a tail, a grep) is not a copy."""
-    try:
-        text = launcher.read_text(errors="replace")[:20000]
-    except OSError:
-        text = ""
-    parts = [r"(^|\s)%s(\s|$)" % re.escape(str(launcher))]
+    as the operator's start.sh does with the pid in svc.pid): a process that runs the launcher (`bash PATH` or PATH), or runs one of the .py files its text (and its inner .sh scripts)
+    mentions (voxcpm_service.py ...) as the script of a Python (with any flags, or `-m name`) or directly, or runs a Python/uvicorn/gunicorn with the launcher's folder in its command
+    line. A command line that merely mentions a name (an editor, a tail, a grep) is not a copy. See also `pidfile_pids`, which the check adds."""
+    lp = re.escape(str(launcher))
+    parts = [r"^(\S*/)?(ba|da|z)?sh\s+(-\S+\s+)*%s(\s|$)" % lp, r"^%s(\s|$)" % lp]
     names = []
-    for m in re.finditer(r"(?<![\w.-])([\w.-]+\.py)\b", text):
-        if m.group(1) not in names and len(names) < 4:
-            names.append(m.group(1))
+    for text in launcher_texts(launcher):
+        for m in re.finditer(r"(?<![\w.-])([\w.-]+\.py)\b", text):
+            if m.group(1) not in names and len(names) < 8:
+                names.append(m.group(1))
     for n in names:
         e = re.escape(n)
-        parts.append(r"^(\S*/)?(python[\d.]*|Python)\s+(-\S+\s+)*(\S*/)?%s(\s|$)" % e)
+        parts.append(PY_RUN + r"(\S*/)?%s(\s|$)" % e)
         parts.append(r"^(\S*/)?%s(\s|$)" % e)
+        parts.append(PY_RUN + r"-m\s+%s(\s|$)" % re.escape(n[:-3]))
+    mods = []
+    for text in launcher_texts(launcher):
+        for m in re.finditer(r"(?:-m\s+|(?:uvicorn|gunicorn)\s+(?:-\S+\s+)*)([A-Za-z_][\w.]*)", text):      # `python -m pkg.mod`, `uvicorn pkg.mod:app`
+            if m.group(1) not in mods and m.group(1) not in ("pip", "venv") and len(mods) < 4:
+                mods.append(m.group(1))
+    for mod in mods:
+        parts.append(r"^(\S*/)?(python[\d.]*|Python|uvicorn|gunicorn)\s+(\S+\s+)*?(-m\s+)?%s([\s:.]|$)" % re.escape(mod))
+    parts.append(r"^(\S*/)?(python[\d.]*|Python|uvicorn|gunicorn)\s+.*%s/" % re.escape(str(launcher.parent)))
     return "|".join(parts)
+
+
+def pidfile_pids(folder: Path) -> list:
+    """[(pid file, pid)] of the *.pid files in a folder (a launcher such as the operator's start.sh keeps svc.pid and kills the pid in it before it starts)."""
+    out = []
+    try:
+        files = sorted(folder.glob("*.pid"))
+    except OSError:
+        return out
+    for f in files[:8]:
+        try:
+            out.append((f, int(f.read_text().strip())))
+        except (OSError, ValueError):
+            continue
+    return out
+
+
+def looks_like_the_service(cmd: str, folder: Path, plan_match: str) -> bool:
+    """Is this command line the service of the launcher in `folder`? It matches the plan, or names the folder or "voxcpm"."""
+    try:
+        if plan_match and re.search(plan_match, cmd):
+            return True
+    except re.error:
+        pass
+    return str(folder) in cmd or "voxcpm" in cmd.lower()
 
 
 def make_plan(name: str, cfg: dict, d: Path, env=None) -> dict:
@@ -258,13 +313,16 @@ def make_plan(name: str, cfg: dict, d: Path, env=None) -> dict:
     if cfg.get("voxcpm_cmd"):
         argv = shlex.split(cfg["voxcpm_cmd"])
         cwd = Path(os.path.expanduser(cfg["voxcpm_dir"])) if cfg.get("voxcpm_dir") else d
-        return {**base, "argv": argv, "cwd": cwd if cwd.is_dir() else d, "match": cfg.get("voxcpm_match") or re.escape(" ".join(argv))}
+        cwd = cwd if cwd.is_dir() else d
+        script = next((cwd / a for a in argv[1:3] if a.endswith(".sh") and (cwd / a).is_file()), None)        # `bash start.sh`: the service is what that script starts
+        match = cfg.get("voxcpm_match") or (launcher_match(script) if script else r"(^|\s)%s(\s|$)" % re.escape(" ".join(argv)))
+        return {**base, "argv": argv, "cwd": cwd, "match": match, "guard": cwd if script else None}
     launcher, tried = find_voxcpm_launcher(cfg, d, env)
     if launcher is None:
         return {**base, "absent": "VoxCPM is not installed here: no launcher (" + ", ".join(LAUNCHERS) + ") in a voxcpm folder"
                 + (f" (looked in {', '.join(tried)})" if tried else "") + "; CLOUDGPU_VOXCPM_CMD names the command"}
     shell = shutil.which("bash") or shutil.which("sh") or "sh"
-    return {**base, "argv": [shell, str(launcher)], "cwd": launcher.parent, "match": cfg.get("voxcpm_match") or launcher_match(launcher)}
+    return {**base, "argv": [shell, str(launcher)], "cwd": launcher.parent, "match": cfg.get("voxcpm_match") or launcher_match(launcher), "guard": launcher.parent}
 
 
 # ---- looking ------------------------------------------------------------------------------------------------------------
@@ -405,7 +463,7 @@ def process_groups() -> dict:
     return out
 
 
-def find_running(plan: dict, started_group=None) -> int | None:
+def find_running(plan: dict, started_group=None) -> int | None:  # noqa: C901
     """The pid of a copy of the service that is running now: a process whose command line matches the plan, or one left in the group of the launcher an earlier run started
     (`started_group`, from the record of this boot); never this one. A pid file is not trusted: after a power-on the pids start over and an old number can belong to anything."""
     me = os.getpid()
@@ -422,7 +480,29 @@ def find_running(plan: dict, started_group=None) -> int | None:
         for pid, grp in process_groups().items():
             if grp == started_group and pid != me and alive(pid):
                 return pid
+    folder = plan.get("guard")
+    if folder:                                               # the launcher's own pid file (svc.pid): its pid counts only when that process looks like the service
+        table = dict(processes())
+        for f, pid in pidfile_pids(folder):
+            if pid != me and alive(pid) and pid in table and looks_like_the_service(table[pid], folder, plan.get("match") or ""):
+                return pid
     return None
+
+
+def retire_stale_pidfiles(plan: dict, say=print) -> None:
+    """Before a launcher is called: a *.pid file in its folder whose process is alive but is NOT the service (after a power-on pids start over, and the number may be ComfyUI's or
+    the adapter's) is renamed to .stale, so a launcher that kills the pid it finds does not kill an unrelated process."""
+    folder = plan.get("guard")
+    if not folder:
+        return
+    table = dict(processes())
+    for f, pid in pidfile_pids(folder):
+        if pid != os.getpid() and alive(pid) and not looks_like_the_service(table.get(pid, ""), folder, plan.get("match") or ""):
+            try:
+                os.replace(f, str(f) + ".stale")
+                say(f"{f.name} named pid {pid}, which is not the service: set aside as {f.name}.stale so the launcher does not kill it")
+            except OSError:
+                pass
 
 
 def container_start() -> float | None:
@@ -586,11 +666,11 @@ class Starter:
                              plan, pid=None, group=group, last_line=ll)
                     return False
                 grace_end = grace_end or min(deadline, time.time() + EXITED_OK_GRACE_S)        # a launcher that returned 0 may have left the service running in the background
-                if time.time() >= grace_end and not (group and find_running({}, group)):      # ... and while something it started still runs, the service is still loading
+                if time.time() >= grace_end and not (group and find_running(plan, group)):      # ... and while something it started still runs, the service is still loading
                     self.rec(name, "down", f"the process ended (exit 0) and nothing answers on :{plan['port']}: see {plan['log'].relative_to(self.d)}", plan, pid=pid, group=group, last_line=ll)
                     return False
             if time.time() >= deadline:
-                live = (find_running({}, group) if group else None) or pid
+                live = (find_running(plan, group) if group else None) or pid
                 self.rec(name, "starting", f"still not answering on :{plan['port']} {plan['wait_s']} s after it was started; the process is running (see {plan['log'].relative_to(self.d)})",
                          plan, pid=live, group=group, since=round(started, 1))
                 return False
@@ -625,6 +705,7 @@ class Starter:
             if not ok:
                 self.rec(name, "down", f"not started: {why}", plan)
                 return "down"
+        retire_stale_pidfiles(plan, self.say)
         try:
             proc = launch(plan, d)
         except OSError as e:
@@ -644,9 +725,11 @@ def up(d: Path, env=None, say=print, sleep=time.sleep) -> int:
         lockf = open(d / LOCK_FILE, "a+")
         try:
             fcntl.flock(lockf, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
+        except BlockingIOError:
             say("another start of the services is running: not starting a second one (python3 services.py status)")
             return 0
+        except OSError as e:                                  # no locking on this filesystem: go on without it rather than never start anything
+            say(f"no lock could be taken ({e.strerror or e}): starting without one")
     cfg, problems = load_config(d, env)
     for p in problems:
         say("setting: " + p)

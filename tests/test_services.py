@@ -1082,5 +1082,94 @@ def test_a_launchers_match_finds_the_python_that_runs_its_service_and_not_an_edi
             assert not rx.search(cmd), cmd
 
 
+def test_a_running_copy_is_found_before_the_launcher_whatever_way_the_launcher_names_its_service_and_a_stale_pid_file_never_costs_an_unrelated_process():
+    import re as _re
+    layouts = {
+        "variable": '#!/bin/bash\nNAME=voxcpm_service\nnohup /opt/py/bin/python /root/voxcpm-svc/$NAME.py &\n',
+        "flags": '#!/bin/bash\nnohup /opt/py/bin/python -X utf8 -u /root/voxcpm-svc/voxcpm_service.py --port 8190 &\n',
+        "inner": '#!/bin/bash\nbash inner.sh\n',
+        "dash_m": '#!/bin/bash\nnohup /opt/py/bin/python -m voxcpm_service --port 8190 &\n',
+    }
+    cmds = {"variable": "/opt/py/bin/python /root/voxcpm-svc/voxcpm_service.py", "flags": "/opt/py/bin/python -X utf8 -u /root/voxcpm-svc/voxcpm_service.py --port 8190 --bind 127.0.0.1",
+            "inner": "/opt/py/bin/python /root/voxcpm-svc/real_server.py --port 8190", "dash_m": "/opt/py/bin/python -m voxcpm_service --port 8190"}
+    for name, text in layouts.items():
+        with _t.tmpdir() as d:
+            f = Path(d) / "start.sh"
+            f.write_text(text)
+            (Path(d) / "inner.sh").write_text("exec /opt/py/bin/python /root/voxcpm-svc/real_server.py --port 8190\n")
+            rx = _re.compile(services.launcher_match(f))
+            if name == "variable":      # the name is a shell variable, so it is not read from the text: the folder in the command line finds it
+                rx = _re.compile(services.launcher_match(Path("/root/voxcpm-svc/start.sh")))
+            assert rx.search(cmds[name]), (name, cmds[name])
+            for other in (f"tail -f {f}", f"vim {f}", f"less {d}/inner.sh", "python other_service.py"):
+                assert not rx.search(other), (name, other)
+    # a launcher given as the command: `bash start.sh` in the folder is the same launcher
+    with world(vox=True) as w:
+        p = services.make_plan("voxcpm", {**w.cfg(), "voxcpm_cmd": "bash start.sh", "voxcpm_dir": str(w.vox)}, w.dir, w.env)
+        assert p["guard"] == w.vox and p["match"] == services.launcher_match(w.vox / "start.sh"), p
+
+
+def test_a_pid_file_of_the_launcher_that_names_a_live_unrelated_process_is_set_aside_before_the_launcher_runs_and_the_real_service_pid_is_kept():
+    with world(vox=True) as w:
+        (w.vox / "start.sh").write_text(f'#!/bin/bash\ncd "$(dirname "$0")"\n[ -f svc.pid ] && kill "$(cat svc.pid)" 2>/dev/null\n'
+                                         f'nohup "{sys.executable}" "{w.vox}/server.py" >/dev/null 2>&1 &\necho $! > svc.pid\n')
+        bystander = subprocess.Popen(["sleep", "300"])
+        try:
+            (w.vox / "svc.pid").write_text(str(bystander.pid))                           # a stale number that now belongs to some other process
+            w.up()
+            assert bystander.poll() is None, "the launcher killed an unrelated process"
+            assert (w.vox / "svc.pid.stale").is_file() and len(w.launches("voxcpm")) == 1 and w.desc("voxcpm")["state"] == "up"
+            real = int((w.vox / "svc.pid").read_text())
+            assert services.alive(real)
+            plan = services.make_plan("voxcpm", w.cfg(), w.dir, w.env)
+            assert services.find_running(plan) == real, "the pid file's process, which looks like the service, counts as a copy that runs"
+            services.retire_stale_pidfiles(plan, lambda x: None)
+            assert (w.vox / "svc.pid").is_file(), "the real service's pid file is kept"
+        finally:
+            bystander.kill()
+            bystander.wait()
+
+
+def test_a_launcher_that_starts_the_service_in_a_session_of_its_own_is_still_starting_not_down_while_it_loads():
+    with world(vox=True) as w:
+        (w.vox / "delay.txt").write_text("5")
+        (w.vox / "start.sh").write_text(f'#!/bin/sh\n"{sys.executable}" -c "import subprocess,sys; subprocess.Popen([sys.executable, \'{w.vox}/server.py\', \'--port\', \'1\'], start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)"\nexit 0\n')
+        (w.vox / "start.sh").chmod(0o755)
+        old = services.EXITED_OK_GRACE_S
+        services.EXITED_OK_GRACE_S = 1
+        try:
+            t = threading.Thread(target=lambda: w.up(CLOUDGPU_VOXCPM_MATCH=r"VoxCPM-service/server\.py"), daemon=True)
+            t.start()
+            time.sleep(3)
+            assert services.read_state(w.dir)["voxcpm"]["state"] == "starting", services.read_state(w.dir)["voxcpm"]
+            t.join(60)
+        finally:
+            services.EXITED_OK_GRACE_S = old
+        assert w.desc("voxcpm")["state"] == "up" and len(w.launches("voxcpm")) == 1
+
+
+def test_a_reason_on_a_widened_bind_has_no_folder_names_and_a_launcher_search_skips_backup_folders():
+    from test_adapter import Box
+    with _t.tmpdir() as d:
+        b = Box(d)
+        try:
+            write_record(Path(d) / "state", comfy={"state": "down", "reason": "ComfyUI is at /root/ComfyUI but no Python (tried /root/miniconda3/bin/python)", "port": 6006})
+            b.comfy.stop()
+            b.host.comfy = "http://127.0.0.1:%d" % free_port()
+            b.host._comfy = (0.0, False)
+            assert "/root" in b.host.health()["services"]["comfy"]["reason"]
+            b.host.proof_ok = False
+            r = b.host.health()["services"]["comfy"]["reason"]
+            assert "/root" not in r and "<path>" in r, r
+        finally:
+            b.srv.shutdown()
+    with _t.tmpdir() as d:
+        base = Path(d) / "base"
+        for n in ("voxcpm-svc.bak", "voxcpm-svc"):
+            (base / n).mkdir(parents=True)
+            (base / n / "start.sh").write_text("")
+        assert services.find_voxcpm_launcher({}, Path(d) / "h3", {"CLOUDGPU_SERVICES_SEARCH": str(base)})[0] == base / "voxcpm-svc" / "start.sh"
+
+
 if __name__ == "__main__":
     _t.main(globals())

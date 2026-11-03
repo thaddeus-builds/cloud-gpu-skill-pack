@@ -43,7 +43,7 @@ if [ -f "$HERE/tts_worker.py" ] && [ -f "$HERE/detect_models.py" ]; then
     echo "voice: IndexTTS2 not found on this box (optional; CLOUDGPU_TTS_DIR and CLOUDGPU_TTS_PYTHON name it)"
   fi
 fi
-# The audio-lock nodes (0.20.0) are only reported, never installed or fetched by this script: the official lock's node is part of ComfyUI, and the third-party pack
+# The audio-lock nodes (0.20.0) are only reported, never installed or fetched by this script: the default (official) lock and addguide use ComfyUI core nodes, and the third-party pack
 # (comfyui-vrgamedevgirl, under a licence that is not open) is the owner's decision. The adapter serves its lock only with CLOUDGPU_ALLOW_NODE_VRGDG=1, which is NOT set by default.
 if [ -f "$HERE/detect_models.py" ]; then
   "$PY" "$HERE/detect_models.py" --comfy-root "$ROOT" --nodes-only --text 2>/dev/null || true

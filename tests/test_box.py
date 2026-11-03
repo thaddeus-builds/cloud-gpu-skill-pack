@@ -188,10 +188,13 @@ def test_the_ssh_door_comes_from_the_account_when_it_is_not_named_and_is_never_a
 
 class FakeAdapter:
     """What the real adapter answers on /health. `token`: it proves it knows it (HMAC of the nonce), as the real one does; None: a process that does not know it.
-    `card`/`worker` are what it reports; `seen` is every request's Authorization header."""
+    `card`/`worker` are what it reports; `seen` is every request's Authorization header. `comfy` and `services` (the 0.22.0 key, None = an older adapter that has none) may be
+    changed while it runs, as a box does while it boots; `asked` counts the /health requests."""
 
-    def __init__(self, comfy=True, busy=0, token="t" * 30, card="NVIDIA GeForce RTX 4090, 49140 MiB", worker="alive"):
+    def __init__(self, comfy=True, busy=0, token="t" * 30, card="NVIDIA GeForce RTX 4090, 49140 MiB", worker="alive", services=None):
         self.seen = seen = []
+        self.comfy, self.services, self.asked = comfy, services, 0
+        me = self
 
         class H(BaseHTTPRequestHandler):
             def log_message(self, *a):
@@ -199,7 +202,10 @@ class FakeAdapter:
 
             def do_GET(self):
                 seen.append(self.headers.get("Authorization"))
-                d = {"ok": worker == "alive", "comfy": comfy, "busy": busy, "worker": worker, "card": card}
+                me.asked += 1
+                d = {"ok": worker == "alive", "comfy": me.comfy, "busy": busy, "worker": worker, "card": card}
+                if me.services is not None:
+                    d["services"] = me.services
                 nonce = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("nonce", [""])[0]
                 if token and nonce:
                     d["proof"] = hmac.new(token.encode(), nonce.encode(), hashlib.sha256).hexdigest()
@@ -211,6 +217,113 @@ class FakeAdapter:
         self.srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
         self.base = f"http://127.0.0.1:{self.srv.server_address[1]}"
         threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+
+
+def _comfy(state, reason):
+    return {"adapter": {"state": "up", "reason": "answers /health"}, "comfy": {"state": state, "reason": reason}, "voxcpm": {"state": "absent", "reason": "not installed on this box"}}
+
+
+def test_a_box_with_no_power_backend_whose_adapter_says_comfy_is_starting_is_waited_for_not_refused():
+    a = FakeAdapter(comfy=False, services=_comfy("starting", "started 40 s ago; not answering yet on :6006"))
+    polls = []
+
+    def sleep(s):                                                  # the box finishes booting while ensure_up waits
+        polls.append(s)
+        if len(polls) == 3:
+            a.comfy, a.services = True, _comfy("up", "answers")
+    try:
+        with autodl_api(lambda *x: 1 / 0) as calls:                # any power call would fail the test
+            b = Box({"CLOUDGPU_BASE": a.base, "CLOUDGPU_TOKEN": "t" * 30, "CLOUDGPU_POWER": "none"}, sleep=sleep)
+            b.ensure_up()
+            assert b._ready and calls == [] and b._powered is False
+        assert polls == [10, 10, 10] and a.asked >= 4, (polls, a.asked)          # it polled at the usual pace, a few times, not in a loop of its own
+        b.ensure_up()
+        assert a.asked < 7                                         # ready: the proof is not asked again inside the minute
+        a.comfy, a.services = False, _comfy("starting", "x")       # an adapter older than 0.22.0 (comfy false, no services) keeps the old answer: nothing known to wait for
+        a.services = None
+        b = box({"CLOUDGPU_BASE": a.base, "CLOUDGPU_POWER": "none"})
+        with _t.raises("down"):
+            b.ensure_up()
+    finally:
+        a.srv.shutdown()
+
+
+def test_a_service_that_stays_starting_past_the_timeout_ends_in_a_timeout_that_quotes_the_adapter_and_never_powers_on():
+    a = FakeAdapter(comfy=False, services=_comfy("starting", "started 40 s ago"))
+    import cloudgpu.box as bx
+    real = bx.UP_TIMEOUT_S
+    bx.UP_TIMEOUT_S = 0.05
+    try:
+        b = Box({"CLOUDGPU_BASE": a.base, "CLOUDGPU_TOKEN": "t" * 30, "CLOUDGPU_POWER": "none"}, sleep=lambda s: time.sleep(0.02))
+        with _t.raises("timeout") as c:
+            b.ensure_up()
+        assert "ComfyUI" not in c.err.message and "comfy is starting: started 40 s ago" in c.err.message and "CLOUDGPU_INSTANCE" not in c.err.message, c.err.message
+        assert a.asked > 2 and b._ready is False and b._powered is False       # it waited and asked again, it did not give up at once
+    finally:
+        bx.UP_TIMEOUT_S = real
+        a.srv.shutdown()
+
+
+def test_a_service_that_is_down_or_absent_is_refused_at_once_with_the_adapters_reason_and_one_that_stops_while_waited_for_ends_the_wait():
+    env = {"CLOUDGPU_TOKEN": "t" * 30, "CLOUDGPU_POWER": "none"}
+    gone = FakeAdapter(comfy=False, services=_comfy("down", "its process exited with code 1 12 s after it was started: see logs/comfy.log"))
+    nogpu = FakeAdapter(comfy=False, services=_comfy("absent", "no ComfyUI folder found (a folder with main.py)"))
+    flips = FakeAdapter(comfy=False, services=_comfy("starting", "started"))
+    try:
+        for a, word in ((gone, "its process exited with code 1"), (nogpu, "no ComfyUI folder found")):
+            with _t.raises("down") as c:
+                Box({**env, "CLOUDGPU_BASE": a.base}, sleep=lambda s: (_ for _ in ()).throw(AssertionError("no wait"))).ensure_up()
+            assert word in c.err.message and "comfy is" in c.err.message and a.asked == 1, c.err.message           # one look, the reason as the adapter wrote it
+        polls = []
+
+        def sleep(s):
+            polls.append(s)
+            flips.services = _comfy("down", "the process (pid 9) that was starting ended without answering")
+        with _t.raises("down") as c:
+            Box({**env, "CLOUDGPU_BASE": flips.base}, sleep=sleep).ensure_up()
+        assert polls == [10] and "ended without answering" in c.err.message, (polls, c.err.message)
+    finally:
+        for a in (gone, nogpu, flips):
+            a.srv.shutdown()
+
+
+def test_ensure_up_waits_for_voxcpm_only_when_the_caller_needs_it():
+    vox = lambda st, r: {**_comfy("up", "answers"), "voxcpm": {"state": st, "reason": r}}
+    a = FakeAdapter(comfy=True, services=vox("starting", "started 5 s ago"))
+    polls = []
+
+    def sleep(s):
+        polls.append(s)
+        a.services = vox("up", "answers")
+    try:
+        b = Box({"CLOUDGPU_BASE": a.base, "CLOUDGPU_TOKEN": "t" * 30, "CLOUDGPU_POWER": "none"}, sleep=sleep)
+        b.ensure_up()                                              # ComfyUI is all it asks for
+        assert polls == [] and b._ready
+        b = Box({"CLOUDGPU_BASE": a.base, "CLOUDGPU_TOKEN": "t" * 30, "CLOUDGPU_POWER": "none"}, sleep=sleep)
+        b.ensure_up(need=("comfy", "voxcpm"))
+        assert polls == [10] and b._ready
+        a.services = vox("absent", "VoxCPM is not installed here")
+        with _t.raises("down") as c:
+            box({"CLOUDGPU_BASE": a.base, "CLOUDGPU_POWER": "none"}).ensure_up(need=("comfy", "voxcpm"))
+        assert "voxcpm is absent: VoxCPM is not installed here" in c.err.message
+    finally:
+        a.srv.shutdown()
+
+
+def test_a_box_with_a_backend_whose_adapter_says_starting_is_waited_for_without_a_power_on_call():
+    a = FakeAdapter(comfy=False, services=_comfy("starting", "started 40 s ago"))
+    n = []
+
+    def sleep(s):
+        n.append(s)
+        a.comfy = True
+    try:
+        with autodl_api(lambda m, path, b, q: "shutdown") as calls:           # the account's word would say off, but the adapter answers: the box is on
+            b = Box({"CLOUDGPU_BASE": a.base, "CLOUDGPU_TOKEN": "t" * 30, "CLOUDGPU_INSTANCE": "pro-1", "AUTODL_DEV_TOKEN": "dev"}, sleep=sleep)
+            b.ensure_up()
+            assert not any(c[1] == "power_on" for c in calls) and n == [10] and b._powered is False, (calls, n)
+    finally:
+        a.srv.shutdown()
 
 
 def test_the_status_reads_the_box_and_the_pass_and_never_prints_a_secret():

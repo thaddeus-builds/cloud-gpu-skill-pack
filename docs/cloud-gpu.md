@@ -111,6 +111,7 @@ of these set in its environment, into `services.json` (0600), so the power-on ho
 `reason`: the process exited with a code, no GPU, no ComfyUI folder or no Python with torch found, autostart off, no start recorded) or `absent`. `services.voxcpm` is the same, plus `loaded` (its model is in memory, or null when it
 does not say). `last_line` (the log's last line when a start failed) is told only on a loopback bind. A take sent while ComfyUI is down is accepted and waits for it up to 10 minutes (a cold box is still starting); if it never comes, the
 take is `FAILED` with `ComfyUI is not answering after 600 s: <state>, <reason>` (it was only "ComfyUI is not answering" before). `Box.ensure_up()` adds the same reason to its timeout.
+From 0.22.1 `Box.ensure_up()` reads `services` too: when the adapter answers and a service the caller needs (`need=("comfy",)` by default, `("comfy", "voxcpm")` for a caller that speaks) is `starting`, it waits for it (every 10 s, up to 900 s, no power call: the box is on), also with `CLOUDGPU_POWER=none`; with `none`, a needed service that is `down` or `absent` is refused at once with the adapter's own reason (`CloudGpuError` kind `down`).
 
 **Not done.** Nothing watches the services afterwards: one that dies mid-session stays down until `start.sh` is run again (a person, or the next power-on). The VoxCPM launcher is found by convention (above). The port of ComfyUI can be
 changed only at install. No real box was run for this change: the tests start a fake ComfyUI and a fake VoxCPM.

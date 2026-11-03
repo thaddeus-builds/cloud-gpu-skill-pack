@@ -7,7 +7,7 @@ calls a client of that API already makes, so a client needs a base URL and a tok
     GET  /api/v1/comfyui/comfyui_workflow/result/{task_id}  -> {"code":"Success","data":{"status":QUEUED|RUNNING|SUCCESS|FAILED,
                                                                 "results":[{"url":...,"type":"video","file_type":"mp4"}]}}
     GET  /health[?nonce=X]                                  -> {"ok":bool,"comfy":bool,"busy":N,"worker":"alive"|"dead","card":"NVIDIA ..., 49140 MiB"|"unknown",
-                                                                "memory_mib":49140|null,"vram_free_mib":N|null,"voice":bool,"t2v":bool,"audio_lock":[...],"audio_lock_detail":{...} [,"proof":HMAC-SHA256(token, X) hex]}   (no token; `ok` is false when the worker thread is
+                                                                "memory_mib":49140|null,"vram_free_mib":N|null,"voice":bool,"t2v":bool,"audio_lock":[...],"audio_lock_detail":{...},"services":{...} [,"proof":HMAC-SHA256(token, X) hex]}   (no token; `ok` is false when the worker thread is
                                                                 dead; N = takes accepted and not yet over, plus finished ones not yet collected until
                                                                 GRACE_S after they finished: a caller shuts the box down only at 0. `card` is the GPU the
                                                                 box runs on, so a caller can check the box it declared; `memory_mib` is the first GPU's
@@ -16,6 +16,9 @@ calls a client of that API already makes, so a client needs a base URL and a tok
                                                                 values of minimax_h3_image_audio_locked this box serves RIGHT NOW (["official","addguide"], ["official","addguide","audiodrive"], or [] when ComfyUI has no usable lock node or
                                                                 has not answered yet; an adapter older than 0.20.0 has no such key and refuses the workflow); `audio_lock_detail` says per lock whether its node
                                                                 was found in ComfyUI's /object_info, where it comes from (module, pack, commit) and, for audiodrive, whether the operator switched it on. `proof` lets a client that holds the token tell
+                                                                `services` (0.21.0) says per service ("comfy", "voxcpm") {"state": "up"|"starting"|"down"|"absent", "reason", "port", "log" [, "loaded" (voxcpm: its model is in memory)]}:
+                                                                `comfy` is the same fact as the `comfy` key with the reason a person can act on; "absent" = not installed on this box (VoxCPM is optional). An adapter older than 0.21.0 has no such key.
+                                                                `proof` lets a client that holds the token tell
                                                                 this adapter from another process holding the tunnel's port: it is answered only when the
                                                                 bind address is loopback, for a nonce of 16 to 64 lowercase hex characters, at most
                                                                 PROOF_PER_MIN a minute; on a widened bind there is no proof (it would be an offline
@@ -131,6 +134,9 @@ GRACE_S = 300                      # a finished take counts as busy this long un
 FFMPEG_TIMEOUT_S = 600
 SOCKET_TIMEOUT_S = 60              # a client that stalls this long loses its connection and its handler thread
 COMFY_CACHE_S, CARD_RETRY_S = 2, 60
+SERVICES_FILE = "services.state.json"       # written by onbox/services.py (0.21.0): what the start of ComfyUI and VoxCPM saw; /health says it
+SERVICES_CACHE_S = 3
+VOXCPM_PORT = 8190
 FREE_AFTER_TAKE = True             # after a take that leaves nothing waiting, ComfyUI is asked to unload its models (the next take loads them again)
 PROOF_PER_MIN = 30                 # answers with a `proof` per minute: a client asks about once a minute
 NONCE = re.compile(r"[0-9a-f]{16,64}")
@@ -762,6 +768,115 @@ def lock_entry(lock: str, infos: dict, checked: bool, allowed: bool, root: Path)
     return e
 
 
+# ---- the other services of the box (0.21.0) --------------------------------------------------------------------------
+
+def container_start():
+    """When this box was powered on, from its first process; None where /proc does not say (a copy of onbox/services.py `container_start`)."""
+    try:
+        ticks = int(Path("/proc/1/stat").read_text().rsplit(")", 1)[1].split()[19])
+        btime = next(int(l.split()[1]) for l in Path("/proc/stat").read_text().splitlines() if l.startswith("btime "))
+        return btime + ticks / os.sysconf("SC_CLK_TCK")
+    except (OSError, ValueError, IndexError, StopIteration, AttributeError):
+        return None
+
+
+def pid_alive(pid) -> bool:
+    if type(pid) is not int or not 0 < pid < 2**31:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except (OSError, OverflowError, ValueError):
+        return False
+    try:
+        return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[-1].split()[0] != "Z"
+    except (OSError, IndexError):
+        return True
+
+
+def service_view(up: bool, rec, is_alive, now: float, since=None) -> tuple:
+    """(state, reason, last_line) of one service: up | starting | down | absent, from whether it answers and what onbox/services.py last recorded. A record from before this power-on
+    (`since`) says nothing. A copy of onbox/services.py `classify` (this file stands alone on the box); tests/test_services.py holds the two equal."""
+    rec = rec if isinstance(rec, dict) else {}
+    if since is not None and isinstance(rec.get("updated"), (int, float)) and rec["updated"] < since - 2:
+        rec = {}
+    last = str(rec.get("last_line") or "")[:160] or None
+    if up:
+        return "up", (str(rec["reason"])[:300] if rec.get("state") == "up" and rec.get("reason") else "answers"), None
+    st, reason = rec.get("state"), str(rec.get("reason") or "")[:300]
+    if not rec:
+        return "down", "does not answer, and no start has been recorded since this box was powered on (start.sh has not started it yet, or does not start it)", None
+    if st == "absent":
+        return "absent", reason or "not installed on this box", None
+    if st == "starting":
+        since_t = rec.get("since")
+        if is_alive(rec.get("pid")) or (isinstance(rec.get("until"), (int, float)) and now < rec["until"]):
+            age = f" (for {int(now - since_t)} s)" if isinstance(since_t, (int, float)) else ""
+            return "starting", (reason or "starting") + age, None
+        return "down", "it was starting, but its process is gone and nothing answers", None
+    if st == "up":
+        return "down", "it answered when it was started and does not now: its process ended or hangs; start.sh starts it again", None
+    return "down", reason or "does not answer", last
+
+
+def probe_voxcpm(port: int, timeout: float = 1.0) -> tuple:
+    """(answers, model loaded or None, busy). Only GET /voxcpm/v1/health, which loads nothing; any HTTP answer below 500 is a server that is up, and so is a connection that is accepted
+    but not answered in full within `timeout` IN ALL (a single-threaded service working on a voice, or one that drips bytes: busy True; a timer shuts the socket at the deadline).
+    Never raises."""
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout * 2 + 1)      # the timer below is what ends the wait for an answer
+    fired = []
+    timer = None
+    t0 = time.monotonic()
+    try:
+        try:
+            conn.sock = socket.create_connection(("127.0.0.1", port), timeout=timeout)         # the connect has the same budget
+        except (socket.timeout, TimeoutError):
+            return True, None, True              # a connect that does not complete is a listener whose accept queue is full: working, not gone
+        except Exception:
+            return False, None, False
+        conn.sock.settimeout(timeout * 2 + 1)                # the timer is what ends the wait; the socket's own timeout only backs it up
+
+        def stop():
+            fired.append(1)
+            try:
+                conn.sock.shutdown(socket.SHUT_RDWR)
+            except Exception:
+                pass
+        timer = threading.Timer(max(0.05, timeout - (time.monotonic() - t0)), stop)
+        timer.daemon = True
+        timer.start()
+        try:
+            conn.request("GET", "/voxcpm/v1/health")
+            r = conn.getresponse()
+            body = b""
+            while len(body) < 65536:
+                chunk = r.read1(4096)
+                if not chunk:
+                    break
+                body += chunk
+            if fired:
+                return True, None, True
+            try:
+                doc = json.loads(body)
+            except Exception:
+                doc = None
+            return r.status < 500, (bool(doc["loaded"]) if isinstance(doc, dict) and "loaded" in doc else None), False
+        except (socket.timeout, TimeoutError):
+            return True, None, True
+        except Exception:
+            return (True, None, True) if fired else (False, None, False)
+    finally:
+        if timer is not None:
+            timer.cancel()
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
 # ---- the server ------------------------------------------------------------------------------------------------------
 
 class Host:
@@ -793,6 +908,8 @@ class Host:
         self._lock_caps: tuple = (0.0, None)   # (when ComfyUI's lock nodes were last read, what they said)
         self.proof_ok = loopback_bind(bind)     # on any other bind /health never answers `proof`
         self._proofs: list = []                 # when the last answers with a proof were made (the last minute)
+        self._vox = (0.0, 0, (False, None, False))     # the VoxCPM service's health, kept SERVICES_CACHE_S: (when, port, (answers, loaded, busy))
+        self._vox_lock = threading.Lock()
         self.orphans = self.restarted()
         self.maintain(force=True)
 
@@ -1039,10 +1156,61 @@ class Host:
             locks = {k: {**e, "commit": None, "version": None} if "commit" in e else e for k, e in locks.items()}
         d = {"ok": alive, "comfy": up, "busy": self.busy(), "worker": "alive" if alive else "dead", "card": card,
              "memory_mib": self._mem_mib if card != "unknown" else None, "vram_free_mib": self._vram_free if up else None, "voice": bool(self.tts), "files": 1, "t2v": True,
-             "audio_lock": [k for k, e in locks.items() if e["usable"]], "audio_lock_detail": {"checked": caps["checked"], **locks}}
+             "audio_lock": [k for k, e in locks.items() if e["usable"]], "audio_lock_detail": {"checked": caps["checked"], **locks}, "services": self.services(up)}
         if nonce and self.proof_ok and NONCE.fullmatch(nonce) and self._proof_allowed():
             d["proof"] = hmac.new(self.token.encode(), nonce.encode(), "sha256").hexdigest()
         return d
+
+    def services(self, comfy_up: bool) -> dict:
+        """Per service {state, reason, port, log}: what answers now and what onbox/services.py (run by start.sh after a boot) recorded. Never raises and never waits long: /health is
+        unauthenticated and start.sh reads it to decide whether a take is on the adapter. `last_line`, the log's last line when a start failed, is told only on a loopback bind: a widened
+        bind answers anyone."""
+        try:
+            return self._services(comfy_up)
+        except Exception:
+            return {n: {"state": "unknown", "reason": "the adapter could not read this box's service record", "port": None, "log": None} for n in ("comfy", "voxcpm")}
+
+    def _services(self, comfy_up: bool) -> dict:
+        try:
+            with open(self.state / SERVICES_FILE, "rb") as f:
+                doc = json.loads(f.read(1 << 20))
+            recs = doc.get("services") if isinstance(doc, dict) else None
+        except Exception:
+            recs = None
+        recs = recs if isinstance(recs, dict) else {}
+        since, now = container_start(), time.time()
+        out = {}
+        for name in ("comfy", "voxcpm"):
+            rec = recs.get(name) if isinstance(recs.get(name), dict) else None
+            port = rec.get("port") if rec and type(rec.get("port")) is int and 1 <= rec["port"] <= 65535 else (VOXCPM_PORT if name == "voxcpm" else None)
+            loaded, busy = None, False
+            if name == "comfy":
+                up = comfy_up
+                port = urllib.parse.urlparse(self.comfy).port
+            else:
+                if self._vox_lock.acquire(blocking=False):      # one caller probes; the others read the last answer rather than wait behind a service that is slow
+                    try:
+                        when, p0, res = self._vox
+                        if now - when >= SERVICES_CACHE_S or p0 != port:
+                            res = probe_voxcpm(port)
+                            self._vox = (time.time(), port, res)
+                    finally:
+                        self._vox_lock.release()
+                else:
+                    if self._vox[0] == 0.0 and self._vox_lock.acquire(timeout=2.5):      # never probed yet: wait for the first answer rather than report the empty one
+                        self._vox_lock.release()
+                    res = self._vox[2]
+                up, loaded, busy = res
+            state, reason, last = service_view(up, rec, pid_alive, now, since)
+            if busy and up:
+                reason = "accepts connections but did not answer /voxcpm/v1/health in time (working on a voice?)"
+            e = {"state": state, "reason": reason, "port": port, "log": "logs/" + ("comfyui.log" if name == "comfy" else "voxcpm.log")}
+            if name == "voxcpm":
+                e["loaded"] = loaded if up else None
+            if last and self.proof_ok:
+                e["last_line"] = last
+            out[name] = e
+        return out
 
     def _proof_allowed(self) -> bool:
         now = time.time()
@@ -1191,7 +1359,8 @@ class Host:
         deadline = time.time() + COMFY_WAIT_S
         while not self.comfy_up():
             if time.time() > deadline:
-                raise RuntimeError("ComfyUI is not answering")
+                st = self.services(False)["comfy"]
+                raise RuntimeError(f"ComfyUI is not answering after {COMFY_WAIT_S} s: {st['state']}, {st['reason']}")
             time.sleep(3)
         p, files = t["plan"], t["inputs"]
         lock = p.get("lock")

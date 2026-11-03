@@ -7,7 +7,7 @@ measured runs. Stdlib only, Python 3.9+.
 
 ```
 cloudgpu/           the package: Box (reach, tunnel, power), Pool (boxes in order of preference, a person's hold on a box, a line for the takes of one machine, a line on the box for the takes of every machine), vendors/ (the cloud accounts' APIs: autodl built in), power backends, the adapter (runs on the box), the voice (IndexTTS2) it can serve, detect_models.py, price, status, util (the utilisation report from the box's task records), bench
-cloudgpu/onbox/       install.sh, tunnel.sh, the two verified model presets
+cloudgpu/onbox/       install.sh, tunnel.sh, services.py (starts ComfyUI and VoxCPM after a boot), the two verified model presets
 cloudgpu/data/      runs.jsonl: the takes measured on a 4090 48G and an RTX PRO 6000
 docs/cloud-gpu.md   what it costs, how to set up a box, the settings, the calls, safety
 docs/how-to-run-boxes.md   passes are the base, hourly boxes the top-up: who does what and when a pass ends
@@ -31,6 +31,10 @@ box = Box()                         # CLOUDGPU_* from the environment
 box.ensure_up()                     # tunnel by key, power on if off (by design, no confirmation: see docs, "Who may power a box")
 api, token = box.api_base(), box.token()
 ```
+
+A box runs three processes: the adapter (:6009), ComfyUI (:6006, 2 to 3 minutes to answer) and, when installed, the VoxCPM voice service (:8190, its model loads on the first voice). From 0.21.0 the box's
+`start.sh` starts all three after a boot, in that order, only what is down (VoxCPM's weights are never loaded by the start). Check each with `python3 -m cloudgpu status` (`services`: up / starting / down / absent, with the reason),
+the adapter's `/health` (`comfy`, `services`) or, on the box, `python3 ~/h3host/services.py status`; logs are `~/h3host/logs/comfyui.log`, `voxcpm.log`, `services.log`. Details: docs/cloud-gpu.md, "What a box runs".
 
 Use it from another project by installing it (`pip install git+https://github.com/thaddeus-builds/cloud-gpu-skill-pack.git`) or by vendoring the `cloudgpu/` folder as a plain copy
 (never edit the copy: fix it here and take it again). The first consumer is [adcut-skill-pack](https://git.coco.xyz/ming.liu/adcut-skill-pack) (its `h3host` avatar provider).

@@ -83,7 +83,7 @@ AUTODL_DEV_TOKEN=…          the autodl backend: the account's developer token 
 The older `H3HOST_<NAME>` names are read second, and only when the new name is absent: a key that is present wins even when empty (`CLOUDGPU_AUTOOFF=` is off, it does not fall through
 to `H3HOST_AUTOOFF`). Values are stripped of surrounding whitespace (a token read from a file keeps no newline). A consumer loads its own `.env` into the environment, or passes a
 mapping: `Box(env)`; `python3 -m cloudgpu status --env-file FILE` and `bench` read a file and warn when other users can read it (chmod 600).
-On the box, `start.sh` also takes `CLOUDGPU_BIND` (default 127.0.0.1), `CLOUDGPU_PUBLIC_BASE`, and leaves an adapter that has a take on it running (it restarts only at `busy` 0).
+On the box, `start.sh` also takes `CLOUDGPU_BIND` (default 127.0.0.1), `CLOUDGPU_PUBLIC_BASE`, `CLOUDGPU_ALLOW_NODE_VRGDG` (empty or unset is off, the default; `1`, `true`, `yes` or `on` is on: the owner's switch for the third-party audiodrive lock, below), and leaves an adapter that has a take on it running (it restarts only at `busy` 0). `install.sh` writes the value it was run with into `start.sh` as the default, so the decision is made at each install: a reinstall without the variable is off again.
 
 ## Use it from code
 
@@ -106,6 +106,7 @@ More than one reference picture (0.8.0): `ref_image_1`..`ref_image_8` take the s
 reads only `<Picture 1>`, so a caller that sends extra pictures should send its own prompt. Measured by the issue's author on the 4090 (48 GB) with one extra picture: 480p, 4.4 s take, 66 s (queued behind another take); 768p, 135 s;
 the large print on a held pack is legible, small print is not. **Not measured:** the 32 GB card (4080 SUPER) with extra pictures: it held 31 GB with one picture, so it may run out of memory.
 A third workflow, `indextts2-v1`, is the voice (0.6.0, below): the same call as the hosted one, the result a wav.
+The audio-locked take (0.20.0): `minimax_h3_image_audio_locked` takes the same fields as `minimax_h3_image_audio_to_video` and one more, `lock` (`addguide`, the default, or `audiodrive`; section "The audio-locked take", below), and the voice on the lips is the audio you sent, not a speech the model made up from it. `minimax_h3_image_audio_to_video` is unchanged and stays for a box whose ComfyUI has no lock node.
 Text to video (0.12.0): `minimax_h3_t2v` takes `prompt`, `duration` 1..15 and optionally `resolution` (default `768p竖`) and `seed`, and no picture or audio: it is the Mode A graph (same FL2VA model,
 same turbo lora and steps, same `--models` names) with both frame inputs left out, so the model invents the picture and speaks what the prompt says. A consumer found the graph by hand on a 4090 box (three
 clips, 768x1344, 90 frames, 6 steps); the adapter's own run of it has not been measured. An adapter older than 0.12.0 answers 400 `unknown workflow`: ask `/health` for `"t2v": true` first.
@@ -115,6 +116,7 @@ a take from the moment it is accepted (while its inputs are still being fetched)
 `card` is the GPU the box runs on, as `nvidia-smi` names it with its memory (`NVIDIA GeForce RTX 4090, 49140 MiB`; `unknown` when it cannot say); `memory_mib` is the first card's memory as a number (`null` when unknown), so a consumer can check the size without parsing text: compare it with the box you declared
 (`CLOUDGPU_BOX`); `python3 -m cloudgpu status` does and says so in `next` when they differ. `vram_free_mib` is the free memory of ComfyUI's first device as ComfyUI itself reports it (`null` when ComfyUI is down or does not say), so a consumer can see whether a second model fits
 before it loads it. `voice` is true when the box has the voice installed; `t2v` is true when it serves `minimax_h3_t2v`. From 0.7.0 a caller waiting in the box's line also counts in `busy`.
+From 0.20.0 `/health` also has `audio_lock` and `audio_lock_detail` (section "The audio-locked take", below): `audio_lock` is the list of `lock` values the box serves right now (`["addguide"]`, `["addguide", "audiodrive"]`, or `[]`); an adapter older than 0.20.0 has no such key and answers the locked workflow 400 `unknown workflow`.
 
 Errors are `CloudGpuError` with `kind`: `key_missing` (a setting or a key file is not right), `http` (a vendor API answered no), `unknown` (not a backend), `down` (the box
 does not answer and nothing can start it), `timeout` (it did not come up); `next` lists what a person can do.
@@ -341,6 +343,70 @@ A caller that wants the memory now (before it starts another model on the card) 
 when a take is accepted or running, or ComfyUI did not answer. Callers can ignore the answer; asking works whatever the setting is. `vram_free_mib` in `/health` shows the effect. A caller waiting in the box's line
 does not hold the free back (it has no take yet): its take loads the models again. **Not measured:** how much of the 46 GB ComfyUI gives back on a real box (`/free` also depends on the ComfyUI version).
 
+## The audio-locked take (0.20.0)
+
+**The problem.** In `minimax_h3_image_audio_to_video` the audio is only a reference: the model decodes a speech from its own latent. Measured by the operator's agent on a real 4090 box (2026-11-03; the same still, the same voice
+audio, one scene, two runs each; not by this package, which cannot run a box): the sample correlation of the video's audio with the audio sent was 0.23 to 0.39, the transcript fidelity 0.72 to 0.77 with the best prompt and 0.00 to 0.17 with the old
+default, and when 1.2 s of silence was put into the audio the model kept speaking and kept the mouth open. A lip-synced ad needs the lips to follow the audio it was given.
+
+**The workflow.** `minimax_h3_image_audio_locked` has the unlocked workflow's fields and validation (`ref_image_0` and `ref_image_1`..`ref_image_8`, `ref_audio_0`, `audio_duration` 1..15, `resolution`, `seed`, `prompt`) and `lock`. It builds
+the same graph from the same `models.json` names and the same size and frame rules, and adds one node that anchors the take's own audio. **The prompt is the request's, word for word**: the adapter adds no speech text. A caller that wants the
+official reference-mode wording (`<Subject 1> (S1) ... <d>[Chinese] LINE</d>`, `<Audio 1>: fully_copy ...`, "No captions ...") sends it; with no `prompt` the unlocked workflow's default is used, which has no speech in it. The audio is also the reference
+`<Audio 1>` (`ref_audios.ref_audio_0`), as the nodes' own descriptions ask.
+
+| `lock` | the node | where it comes from | what the operator measured (4090, 2026-11-03) |
+|---|---|---|---|
+| `addguide` (default) | `MiniMaxH3AddGuide` | ComfyUI itself (`comfy_extras.nodes_minimax_h3`), an official node | locked the audio (correlation 0.935); drew captions in 1 of 2 runs; a re-test is running |
+| `audiodrive` | `VRGDG_MiniMaxH3AudioDrive` | the third-party custom-node pack `comfyui-vrgamedevgirl`; **off by default, licence-restricted (below)** | correlation 0.945, fidelity 0.90 to 0.95; in the silence test the audio was true silence and the mouth closed; same duration, about 3 s more; no captions |
+| `custom` | none | reserved for a future graph made of official nodes only (for example `VAEEncodeAudio` and `SetLatentNoiseMask`) | not implemented: always refused (`lock_not_implemented`) |
+
+How the graphs differ from the unlocked one (the unlocked graph is not touched, a test holds it equal to the 0.19.0 graphs):
+- `addguide`: one node, `MiniMaxH3AddGuide(positive = the reference node's conditioning, latent = its latent, frame_idx = 0, vae, audio_vae, audio = the take's audio)`; the guider takes the new conditioning. The sampler's latent and the decode of the audio from the sampled latent are as before.
+  The node's definition: required `positive`, `latent`, `frame_idx` (default 0, a negative one counts from the tail); optional `vae`, `audio_vae`, `image`, `audio` (anchored from `frame_idx`, trimmed to the remaining duration); one output, the conditioning. No `image` is given: the picture is the reference node's.
+- `audiodrive`: one node, `VRGDG_MiniMaxH3AudioDrive(av_latent = the reference node's latent, source_audio = the take's audio, audio_vae)`; the sampler starts from its first output, the video's audio is its second, and the decode of the audio is gone. This is the graph the operator measured, and a test holds it equal to that graph (modulo model names).
+
+**No silent fallback.** A take of this workflow never runs any other graph than its lock's. The coded errors (HTTP 400 `RequestParameterIsWrong`, the words in `msg` starting with the code, before anything is fetched or queued; a take accepted while ComfyUI was
+still starting and then found without its node is `FAILED` with the same words, never run as another graph):
+
+| code | when |
+|---|---|
+| `lock_not_allowed` | `lock: audiodrive` and the operator has not switched it on (the licence words, below); also when ComfyUI is down or has the node |
+| `lock_node_missing` | ComfyUI's `/object_info` has no node of that name: the message names the node and, for audiodrive, the pack |
+| `lock_node_incompatible` | the node is there but its definition lacks an input the graph wires (a changed version): the message names the input |
+| `lock_state_unknown` | ComfyUI did not answer `/object_info` when the take ran |
+| `lock_not_implemented` | `lock: custom` |
+| `lock_unknown` | any other value of `lock` |
+| `lock_wrong_workflow` | `lock` sent to a workflow that does not lock the audio (the unlocked one, Mode A, text to video, the voice): the caller asked for an anchored audio and would get an unanchored one |
+
+**What `/health` says** (no token). The nodes are looked for by name in ComfyUI's `/object_info` when the adapter starts and again when `/health` or a take asks (at most 30 s old; asked afresh for every take of a lock, and again before a refusal, so a refusal is
+never stale). While ComfyUI is down or silent nothing is known and no lock is offered.
+```
+"audio_lock": ["addguide", "audiodrive"],         the lock values served right now: [] when none is
+"audio_lock_detail": {
+  "checked": true,                                false: ComfyUI did not answer /object_info
+  "addguide":   {"node": "MiniMaxH3AddGuide", "present": true, "usable": true, "module": "comfy_extras.nodes_minimax_h3", "problem": null},
+  "audiodrive": {"node": "VRGDG_MiniMaxH3AudioDrive", "present": true, "usable": true, "allowed": true,
+                 "status": "audiodrive (third-party, licence-restricted, enabled)",
+                 "pack": "comfyui-vrgamedevgirl", "commit": "<40 hex>"|null, "version": "<pyproject version>"|null,
+                 "licence": "VRGameDevGirl Community and Commercial License v1.0", "problem": null}}
+```
+`present` is null when nothing is known; `problem` is the coded words a take of that lock would get (null when it can run); `status` of audiodrive is `audiodrive (third-party, licence-restricted, off: CLOUDGPU_ALLOW_NODE_VRGDG is not set)` until the operator switches it on.
+`pack` is the custom-node folder ComfyUI reports for the node (`python_module`); `commit` is read from that folder's `.git` (no git is run), `version` from its `pyproject.toml`; both are null when they cannot be read. `python3 -m cloudgpu status` shows `box.audio_lock` (null: an adapter older than 0.20.0).
+`install.sh` and `detect_models.py` (`--nodes-only`) report whether the pack is in `custom_nodes` and its commit; they never install or fetch it.
+
+**The third-party pack and its licence: the owner decides.** What is recorded, and what is not:
+- *The operator's reading* (relayed to this change; **the licence text was not read here**): `comfyui-vrgamedevgirl` is under the "VRGameDevGirl Community and Commercial License v1.0", not an open licence. Using it ourselves to make a client's ads is allowed (its section 3).
+  Bundling its code into a paid product or service, offering an API or workflow endpoint that triggers it to third parties, or white-labelling or reselling needs a paid commercial licence (section 4). This package, a box image that carries the pack, and clients who run adcut against a box
+  that triggers it likely fall under section 4. The licence allows independent implementations, which is what `lock: custom` is reserved for. This is not legal advice.
+- *What this package does about it*: it contains none of the pack's code (the graph refers to the node by name and nothing more), vendors, bundles and installs nothing of it, and serves the lock **only** when the box's operator sets `CLOUDGPU_ALLOW_NODE_VRGDG=1` for the adapter. Otherwise the take is refused with
+  `lock_not_allowed`, which names the licence. Switching it on is the owner's decision after the licence question is settled with the author; the adapter does not decide it, and no consumer should set the variable on a box that serves anyone but the owner.
+- *Pin it*: the pack is third-party code that runs inside ComfyUI with the box's rights. Install it on a box image once, at a commit someone looked at, note the commit that `/health` reports (`audio_lock_detail.audiodrive.commit`), save that box image, and never update the pack on a running box. The adapter reports the commit; it does not compare it with a pinned one.
+- *Could not be verified here*: the licence text; the pack's source address, owner and history (the repository was deliberately not opened); the node's code and what exactly it does (only the operator's measurement and the input names of the operator's graph are known); whether a given use is a section 4 use; that the pack is safe to run.
+
+**Not measured, not done.** No box was run for this change: every claim above about a real card is the operator's. The `addguide` graph is wired from the node's definition and ComfyUI's own source; the operator's test graph for it was not available, so its audio is taken from the sampled latent as in the unlocked graph
+(the operator's re-test will say whether that is what they measured). Not tried: either lock with extra reference pictures, at landscape sizes, at 15 s, or with a model set other than the 4090's. There are no price rows for the new workflow (`price` has none until `runs.jsonl` has a warm run of it; the operator saw about 3 s more per take with audiodrive,
+which is not a measured row); `bench` does not take the new workflow yet.
+
 ## Landscape (0.15.0)
 
 `480p横` (864x480) and `768p横` (1344x768) are the vertical sizes with the sides swapped, accepted by all three video workflows. A consumer measured `minimax_h3_lightx2v` at `768p横` on a rented
@@ -434,6 +500,7 @@ A box made from it then needs only the settings wired and `status` run.
   nodes. Keep ComfyUI on 127.0.0.1 and put only the adapter on a public port, or use the tunnel (the restricted key reaches nothing else).
 - Whatever a take sends (a person's still, a voice sample) goes to that box: tell the person, and keep the consent that covers it where your project keeps it.
 - The tunnel is by key, never a password: nothing here accepts or stores one.
+- **A third-party node is code the box runs, and may be licence-restricted.** The only one this package refers to is `VRGDG_MiniMaxH3AudioDrive` (the audio-locked workflow's `audiodrive` lock): off unless the operator sets `CLOUDGPU_ALLOW_NODE_VRGDG=1`, never installed or fetched by this package, to be pinned to a commit and kept in the box image ("The audio-locked take").
 
 ## Measure and price a new box
 

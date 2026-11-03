@@ -25,7 +25,8 @@ OFF_STATUS = ("shutdown", "off")                          # the vendor's words f
 DEFAULT_SPECS = ("v-48g",)                                # 4090 48G
 DEFAULT_CENTERS = ("westDC3", "beijingDC2")
 START_COMMAND = "/root/h3host/start.sh"                   # as in box.py: written by onbox/install.sh, run by the vendor after boot
-BACKOFF_S = (20, 40, 80, 160, 300)                        # waits between rounds when a card is not in stock
+POLL_S = 30                                               # between reads of the vendor's free-card page while waiting (a read costs nothing; the page asks for no more than one in half a minute)
+BACKOFF_S = (20, 40, 80, 160, 300)                        # waits between blind tries when the vendor shows no stock page (or it cannot be read)
 PATIENCE_S = 600                                          # the most `ensure` waits in all for stock
 BOOT_WAIT_S = 300                                         # how long a new instance is waited for to say `running`
 GONE_GRACE_S = 900                                        # an instance the account does not list is called gone only this long after it was created (a listing can lag)
@@ -177,11 +178,27 @@ class Steward:
         return out
 
     # ---- ensure ----
-    def ensure(self, count: int, template: dict, *, specs=None, centers=None, yes: bool = False, patience: float = PATIENCE_S, delays=BACKOFF_S, boot_wait: float = BOOT_WAIT_S) -> dict:
+    def _market(self, combos) -> dict | None:
+        """{(spec, data center): free cards} from the vendor's stock page for the places `ensure` would try, None when the vendor has no such page or it cannot be read now (then every combo is
+        tried blind, as before). A spec the page does not show at all is left out: nothing is known about it, so it is tried. With no data center named, the free cards of every one are added."""
+        try:
+            rows = self.vendor.stock(sorted({c for _, c in combos if c}) or None)
+        except CloudGpuError:
+            return None
+        seen = {r["spec"] for r in rows if r.get("spec")}
+        free: dict = {}
+        for s, c in combos:
+            if s in seen:
+                free[(s, c)] = sum(int(r.get("idle") or 0) for r in rows if r.get("spec") == s and (c is None or r["data_center"] == c))
+        return free
+
+    def ensure(self, count: int, template: dict, *, specs=None, centers=None, yes: bool = False, patience: float = PATIENCE_S, delays=BACKOFF_S, poll: float = POLL_S,
+               boot_wait: float = BOOT_WAIT_S) -> dict:
         """Have `count` of the boxes this setup knows (the ledger's, and the ones wired in the settings) running. Order: instances already running count; then those that are off and
         billed by the hour, or a pass that has not ended, are powered on (a pass that has ended is a person's to renew); then, inside the allowance, new ones are created from `template` for each card spec in `specs`,
-        in order, at each data center in `centers`, in order. A card that is not in stock is tried again after a pause (`delays`, at most `patience` seconds in all); every other
-        failure is reported once and not retried. Without `yes` nothing is changed: the plan is returned. The result says how many are up, how many are missing, and each failure's reason."""
+        in order, at each data center in `centers`, in order (the order IS the preference). Where the vendor shows its free cards, the page is read first and a create is made only for a spec and place that shows a free card,
+        in order, the moment one does: nothing is asked of a card that is not there, and when none is free the page is read again every `poll` seconds (at most `patience` seconds in all). A vendor with
+        no such page, or one that cannot be read, is tried blind and again after the pauses `delays`. Every failure that is not stock is reported once and not retried. Without `yes` nothing is changed: the plan is returned. The result says how many are up, how many are missing, and each failure's reason."""
         specs = list(specs or DEFAULT_SPECS)
         centers = list(centers or [])
         listing = self.vendor.all()
@@ -208,7 +225,8 @@ class Steward:
             short = need - len(plan["would_power_on"])
             plan["would_create"] = short
             if short > 0:
-                plan["order"] = [{"gpu_spec_uuid": s, "data_center": c} for s, c in combos]
+                free = self._market(combos)
+                plan["order"] = [{"gpu_spec_uuid": s, "data_center": c, **({"free": free[(s, c)]} if free and (s, c) in free else {})} for s, c in combos]
                 try:
                     self.check_create({**template, "gpu_spec_uuid": specs[0]}, mine)
                     plan["allowance"] = "covers one more"
@@ -221,9 +239,10 @@ class Steward:
             f = fails.setdefault((what, where, e.kind), {"what": what, "where": where, "kind": e.kind, "reason": e.message[:240], "tries": 0})
             f["tries"] += 1
 
-        pending, creating, waited, rnd, dead = list(power_cands), True, 0.0, 0, set()
+        pending, creating, waited, rnd, dead, market = list(power_cands), True, 0.0, 0, set(), None
         while need > 0:
             stock_miss = False
+            market = self._market(combos) if creating and combos else None
             for i in list(pending):
                 if need <= 0:
                     break
@@ -244,6 +263,10 @@ class Steward:
             for s, c in combos if creating else []:
                 if (s, c) in dead:
                     continue
+                if market is not None and market.get((s, c), 1) <= 0:               # the page shows no free card there: no call, no ledger line, a look again in a moment
+                    fail("create", f"{s}@{c or 'any'}", CloudGpuError("no_stock", "the vendor's page shows no free card there"))
+                    stock_miss = True
+                    continue
                 while need > 0:
                     spec = {**template, "gpu_spec_uuid": s, **({"data_center_list": [c]} if c else {})}
                     spec.setdefault("start_command", START_COMMAND)
@@ -263,11 +286,14 @@ class Steward:
                     need -= 1
                 if not creating or need <= 0:
                     break
-            if need <= 0 or not stock_miss or rnd >= len(delays) or waited + delays[rnd] > patience:
+            step = poll if market is not None else (delays[rnd] if rnd < len(delays) else None)
+            if need <= 0 or not stock_miss or step is None or waited + step > patience:
                 break
-            self.sleep(delays[rnd])
-            waited += delays[rnd]
+            self.sleep(step)
+            waited += step
             rnd += 1
+        if market is not None:
+            out["free_cards_last_seen"] = [{"gpu_spec_uuid": s, "data_center": c, "free": n} for (s, c), n in market.items()]
         out["waited_s"] = waited
         out["failures"] = list(fails.values())
         out["missing"] = need

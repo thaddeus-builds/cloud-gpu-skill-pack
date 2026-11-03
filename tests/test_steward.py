@@ -21,13 +21,13 @@ TEMPLATE = {"req_gpu_amount": 1, "expand_system_disk_by_gb": 0, "application_uui
 
 
 class FakeCloud(Vendor):
-    """An account: `stock[(spec, dc)]` cards left; `errors[(spec, dc)]` an error to raise instead; `power_errors[id]`."""
+    """An account: `cards[(spec, dc)]` cards left (the `stock=` argument); `errors[(spec, dc)]` an error to raise instead; `power_errors[id]`."""
     name, token_env = "fakecloud", "FAKE_TOKEN"
 
     def __init__(self, env=None, instances=None, stock=None):
         super().__init__(env or {"FAKE_TOKEN": "t"})
         self.rows = {i.id: i for i in (instances or [])}
-        self.stock, self.errors, self.power_errors, self.calls, self.n = stock or {}, {}, {}, [], 0
+        self.cards, self.errors, self.power_errors, self.calls, self.n = stock or {}, {}, {}, [], 0
         self.boot_after = 0                                          # status polls before a new instance says running
 
     def list(self, *, page=1, size=50):
@@ -53,9 +53,9 @@ class FakeCloud(Vendor):
         self.calls.append(("create", key))
         if key in self.errors:
             raise self.errors[key]
-        if self.stock.get(key, 0) <= 0:
+        if self.cards.get(key, 0) <= 0:
             raise CloudGpuError("http", "autodl api create: InstanceStockNotEnough 库存不足", status="InstanceStockNotEnough", detail="库存不足")
-        self.stock[key] -= 1
+        self.cards[key] -= 1
         self.n += 1
         iid = f"pro-new{self.n}"
         self.rows[iid] = Instance(id=iid, status="booting", billing="payg", gpu_spec=key[0])
@@ -384,6 +384,65 @@ def test_a_box_with_no_account_view_says_it_may_be_off_or_ended_and_who_can_help
         assert "AUTODL_DEV_TOKEN" in e.message and "CLOUDGPU_INSTANCE" in e.message and "account holder" in text and "never in chat" in e.message
     s = status.status({"CLOUDGPU_POWER": "none", "CLOUDGPU_BASE": "http://127.0.0.1:1", "CLOUDGPU_TOKEN": "t" * 30, "CLOUDGPU_BOX": "x"})
     assert any("cannot tell whether the box is off, its pass has ended" in n and "AUTODL_DEV_TOKEN" in n for n in s["next"]), s["next"]
+
+
+class FakeMarket(FakeCloud):
+    """A vendor that shows its free cards: `stock()` reads `cards`, the same numbers a create is refused by; `reads` counts the page reads and `appear` {read number: {(spec, dc): n}} puts cards on it later."""
+
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self.reads, self.appear = 0, {}
+
+    def stock(self, data_centers=None):
+        self.reads += 1
+        self.cards.update(self.appear.get(self.reads, {}))
+        rows = []
+        for sp in {"v-48g", "pro6000-p"}:
+            for dc in data_centers or ["westDC3", "beijingDC2"]:
+                rows.append({"data_center": dc, "spec": sp, "card": sp, "idle": self.cards.get((sp, dc), 0), "total": 10})
+        return rows
+
+
+def test_with_a_stock_page_a_create_is_made_only_where_a_card_is_free_and_in_the_order_asked_for():
+    with _t.tmpdir() as d:
+        allow(d, instances=4, cny=1000)
+        cloud = FakeMarket(stock={("v-48g", "beijingDC2"): 2, ("pro6000-p", "westDC3"): 1})
+        r = stew(d, cloud).ensure(1, TEMPLATE, specs=["v-48g", "pro6000-p"], centers=["westDC3", "beijingDC2"], yes=True)
+        assert [c[1] for c in cloud.calls if c[0] == "create"] == [("v-48g", "beijingDC2")]               # the first free place in the order; nothing was asked of westDC3 where none was free
+        assert r["missing"] == 0 and r["created"][0]["spec"] == "v-48g" and r["created"][0]["data_center"] == "beijingDC2" and cloud.reads == 1
+        assert [x["action"] for x in quota.Ledger(quota.ledger_path(env_of(d))).rows() if x["action"].startswith("create")] == ["create-attempt", "create"]       # no attempt line for a card that was not there
+
+
+def test_with_a_stock_page_ensure_waits_by_reading_the_page_and_takes_the_card_the_moment_it_shows():
+    with _t.tmpdir() as d:
+        allow(d, instances=4, cny=1000)
+        slept = []
+        cloud = FakeMarket(stock={})
+        cloud.appear = {3: {("pro6000-p", "westDC3"): 1}}                                                  # nothing at the first two reads, a card at the third
+        r = stew(d, cloud, sleep=slept.append).ensure(1, TEMPLATE, specs=["v-48g", "pro6000-p"], centers=["westDC3"], yes=True, poll=30, patience=120)
+        assert slept == [30, 30] and cloud.reads == 3 and r["missing"] == 0 and r["created"][0]["spec"] == "pro6000-p"
+        assert [c[1] for c in cloud.calls if c[0] == "create"] == [("pro6000-p", "westDC3")]               # the one create is the one that worked
+        r2 = stew(d, FakeMarket(stock={}), sleep=slept.append).ensure(1, TEMPLATE, specs=["v-48g"], centers=["westDC3"], yes=True, poll=30, patience=60)
+        assert r2["missing"] == 1 and r2["failures"][0]["kind"] == "no_stock" and "page shows no free card" in r2["failures"][0]["reason"] and r2["free_cards_last_seen"][0]["free"] == 0
+        assert not any(c[0] == "create" for c in FakeMarket(stock={}).calls)
+
+
+def test_the_plan_shows_the_free_cards_and_a_page_that_cannot_be_read_falls_back_to_blind_tries():
+    with _t.tmpdir() as d:
+        allow(d, instances=4, cny=1000)
+        cloud = FakeMarket(stock={("v-48g", "westDC3"): 1})
+        dry = stew(d, cloud).ensure(1, TEMPLATE, specs=["v-48g"], centers=["westDC3", "beijingDC2"], yes=False)
+        assert dry["order"] == [{"gpu_spec_uuid": "v-48g", "data_center": "westDC3", "free": 1}, {"gpu_spec_uuid": "v-48g", "data_center": "beijingDC2", "free": 0}]
+        def broken(data_centers=None):
+            raise CloudGpuError("http", "autodl market gpu_type: the answer was not JSON", status="network")
+        cloud2 = FakeMarket(stock={("v-48g", "westDC3"): 1})
+        cloud2.stock = broken
+        r = stew(d, cloud2).ensure(1, TEMPLATE, specs=["v-48g"], centers=["westDC3"], yes=True)
+        assert r["missing"] == 0 and [c[1] for c in cloud2.calls if c[0] == "create"] == [("v-48g", "westDC3")] and "free_cards_last_seen" not in r
+        cloud3 = FakeMarket(stock={("pro6000-p", "westDC3"): 1})
+        cloud3.stock = lambda data_centers=None: [{"data_center": "westDC3", "spec": "v-48g", "card": "x", "idle": 0, "total": 1}]            # the page does not show pro6000-p at all
+        r3 = stew(d, cloud3).ensure(1, TEMPLATE, specs=["pro6000-p"], centers=["westDC3"], yes=True, delays=(), patience=0)                  # nothing is known of it: tried, not skipped
+        assert [c[1] for c in cloud3.calls if c[0] == "create"] == [("pro6000-p", "westDC3")] and r3["missing"] == 0
 
 
 if __name__ == "__main__":

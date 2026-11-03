@@ -37,8 +37,13 @@ def _service(h: dict | None, name: str) -> tuple[str, str]:
     if isinstance(e, dict):
         r = e.get("reason")
         st = e.get("state")
+        if st == "up" and name == "comfy":                        # the `comfy` key is the one fact; a `services` that says up beside a false key is not believed
+            return "unknown", "the adapter says ComfyUI answers in `services` and does not in `comfy`"
         return (st if st in ("up", "starting", "down", "absent") else "unknown"), (str(r)[:300] if r else "")
     return "unknown", ""
+
+
+LABEL = {"comfy": "ComfyUI", "voxcpm": "VoxCPM"}
 
 
 def _check_need(need) -> tuple:
@@ -59,8 +64,10 @@ def _not_up(h: dict | None, need) -> list[tuple[str, str, str]]:
 
 
 def _only_starting(h: dict | None, wait: list) -> bool:
-    """The adapter answers (its worker is alive) and every needed service that is not up says it is starting: the box is on."""
-    return isinstance(h, dict) and h.get("ok") is not False and bool(wait) and all(st == "starting" for _n, st, _r in wait)
+    """The adapter answers (its worker is alive) and a needed service that is not up says it is starting, the others starting or down (VoxCPM reads down until start.sh reaches it):
+    the box is on and booting."""
+    return (isinstance(h, dict) and h.get("ok") is not False and any(st == "starting" for _n, st, _r in wait)
+            and all(st in ("starting", "down") for _n, st, _r in wait))
 
 
 class Box:
@@ -206,7 +213,7 @@ class Box:
                 end = time.time() + UP_TIMEOUT_S
                 while wait:
                     if time.time() > end:
-                        why = "".join(f"; the adapter answers and says {n} is {st}: {r}" for n, st, r in wait if r)
+                        why = "".join(f"; the adapter answers and says {LABEL[n]} is {st}: {r}" for n, st, r in wait if r)
                         hint = "; " + NO_ACCOUNT_HINT if not pw.configured() and not isinstance(h, dict) else ""      # said when nothing answered, not when the adapter did
                         raise CloudGpuError("timeout", f"the box did not come up in {UP_TIMEOUT_S}s" + why + hint,
                                             ["look at the box at its vendor; nothing was sent"], detail=pw.name)
@@ -228,16 +235,17 @@ class Box:
             return
         for n, st, r in wait:
             if st == "unknown" and n != "comfy":
-                raise CloudGpuError("down", f"the box answers, but its adapter does not say whether {n} is up" + (f": {r}" if r else " (an adapter older than 0.22.0 does not report it)"),
+                raise CloudGpuError("down", f"the box answers, but its adapter does not say whether {LABEL[n]} is up" + (f": {r}" if r else " (an adapter older than 0.22.0 does not report it)"),
                                     ["python3 -m cloudgpu status", "update the adapter on the box (docs, 'Set up a box')"], detail=n)
 
     def _refuse_if_stopped(self, h: dict | None, wait: list) -> None:
-        """With no power backend: the adapter answers and a needed service is down or absent with a reason, which is what a person must read; nothing here can start it."""
+        """With no power backend: the adapter answers and a needed service is absent, or down while none is starting, with a reason, which is what a person must read; nothing here can start it."""
         if not isinstance(h, dict) or h.get("ok") is False:
             return
+        coming = any(st == "starting" for _n, st, _r in wait)        # start.sh starts ComfyUI first and VoxCPM after it: until then VoxCPM reads "down: no start recorded yet"
         for n, st, r in wait:
-            if st in ("down", "absent") and r:
-                raise CloudGpuError("down", f"the box answers, but {n} is {st}: {r}",
+            if r and (st == "absent" or (st == "down" and not coming)):
+                raise CloudGpuError("down", f"the box answers, but {LABEL[n]} is {st}: {r}",
                                     [f"{n} is not starting by itself: look at the box (sh ~/h3host/start.sh starts what is down; a person runs it)", "python3 -m cloudgpu status"], detail=n)
 
     # ---- the line of callers on other machines (line.py) ----

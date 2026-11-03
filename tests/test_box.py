@@ -257,7 +257,7 @@ def test_a_service_that_stays_starting_past_the_timeout_ends_in_a_timeout_that_q
         b = Box({"CLOUDGPU_BASE": a.base, "CLOUDGPU_TOKEN": "t" * 30, "CLOUDGPU_POWER": "none"}, sleep=lambda s: time.sleep(0.02))
         with _t.raises("timeout") as c:
             b.ensure_up()
-        assert "ComfyUI" not in c.err.message and "comfy is starting: started 40 s ago" in c.err.message and "CLOUDGPU_INSTANCE" not in c.err.message, c.err.message
+        assert "ComfyUI is starting: started 40 s ago" in c.err.message and "CLOUDGPU_INSTANCE" not in c.err.message, c.err.message
         assert a.asked > 2 and b._ready is False and b._powered is False       # it waited and asked again, it did not give up at once
     finally:
         bx.UP_TIMEOUT_S = real
@@ -273,7 +273,7 @@ def test_a_service_that_is_down_or_absent_is_refused_at_once_with_the_adapters_r
         for a, word in ((gone, "its process exited with code 1"), (nogpu, "no ComfyUI folder found")):
             with _t.raises("down") as c:
                 Box({**env, "CLOUDGPU_BASE": a.base}, sleep=lambda s: (_ for _ in ()).throw(AssertionError("no wait"))).ensure_up()
-            assert word in c.err.message and "comfy is" in c.err.message and a.asked == 1, c.err.message           # one look, the reason as the adapter wrote it
+            assert word in c.err.message and "ComfyUI is" in c.err.message and a.asked == 1, c.err.message           # one look, the reason as the adapter wrote it
         polls = []
 
         def sleep(s):
@@ -305,7 +305,7 @@ def test_ensure_up_waits_for_voxcpm_only_when_the_caller_needs_it():
         a.services = vox("absent", "VoxCPM is not installed here")
         with _t.raises("down") as c:
             box({"CLOUDGPU_BASE": a.base, "CLOUDGPU_POWER": "none"}).ensure_up(need=("comfy", "voxcpm"))
-        assert "voxcpm is absent: VoxCPM is not installed here" in c.err.message
+        assert "VoxCPM is absent: VoxCPM is not installed here" in c.err.message
     finally:
         a.srv.shutdown()
 
@@ -319,7 +319,7 @@ def test_what_ensure_up_proved_is_remembered_per_service_and_a_bad_need_or_an_un
         b.ensure_up()
         with _t.raises("down") as c:                               # the box is ready for ComfyUI, not for what was not asked: no answer from the cache
             b.ensure_up(need=("comfy", "voxcpm"))
-        assert "voxcpm is absent" in c.err.message
+        assert "VoxCPM is absent" in c.err.message
         b.ensure_up()                                              # and ComfyUI alone is still ready
         for bad in ("comfy", (), ("comfy", "tts"), None):
             try:
@@ -332,11 +332,31 @@ def test_what_ensure_up_proved_is_remembered_per_service_and_a_bad_need_or_an_un
             with autodl_api(lambda m, path, bd, q: "shutdown") as calls:
                 with _t.raises("down") as c:
                     box({"CLOUDGPU_BASE": old.base, **backend}).ensure_up(need=("comfy", "voxcpm"))
-                assert "does not say whether voxcpm is up" in c.err.message and not any(x[1] == "power_on" for x in calls), (c.err.message, calls)
+                assert "does not say whether VoxCPM is up" in c.err.message and not any(x[1] == "power_on" for x in calls), (c.err.message, calls)
         box({"CLOUDGPU_BASE": old.base, "CLOUDGPU_POWER": "none"}).ensure_up()
     finally:
         a.srv.shutdown()
         old.srv.shutdown()
+
+
+def test_voxcpm_reading_down_until_start_sh_reaches_it_is_waited_for_while_comfy_starts_and_comfy_up_beside_a_false_key_is_not_believed():
+    boot = {**_comfy("starting", "started 30 s ago"), "voxcpm": {"state": "down", "reason": "does not answer, and no start has been recorded since this box was powered on"}}
+    a = FakeAdapter(comfy=False, services=boot)
+    polls = []
+
+    def sleep(s):
+        polls.append(s)
+        a.comfy, a.services = True, {**_comfy("up", "answers"), "voxcpm": {"state": "up", "reason": "answers"}}
+    odd = FakeAdapter(comfy=False, services=_comfy("up", "answers"))
+    try:
+        Box({"CLOUDGPU_BASE": a.base, "CLOUDGPU_TOKEN": "t" * 30, "CLOUDGPU_POWER": "none"}, sleep=sleep).ensure_up(need=("comfy", "voxcpm"))
+        assert polls == [10]                                       # not refused at 0 s: ComfyUI is first in the boot order and VoxCPM comes after it
+        with _t.raises("down") as c:
+            box({"CLOUDGPU_BASE": odd.base, "CLOUDGPU_POWER": "none"}).ensure_up()
+        assert "does not in `comfy`" in c.err.message or "does not answer" in c.err.message
+    finally:
+        a.srv.shutdown()
+        odd.srv.shutdown()
 
 
 def test_a_box_with_a_backend_whose_adapter_says_starting_is_waited_for_without_a_power_on_call():

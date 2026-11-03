@@ -182,7 +182,7 @@ def ensure_cmd(a, v, out) -> int:
             out(json.dumps({"error": "the request is not one the vendor takes", "problems": problems}, ensure_ascii=False))
             return 2
     st = Steward(v, os.environ, agent=True)
-    r = st.ensure(a.count, template, specs=specs, centers=centers, yes=a.yes, patience=a.patience)
+    r = st.ensure(a.count, template, specs=specs, centers=centers, yes=a.yes, patience=a.patience, poll=a.poll)
     out(json.dumps(r, ensure_ascii=False))
     return 0 if not r["missing"] else 1
 
@@ -270,12 +270,13 @@ def main(argv: list[str] | None = None) -> int:
     q.add_argument("--spec", required=True, help="a JSON file of the vendor's create request, or - for stdin")
     q.add_argument("--yes", action="store_true")
     q.add_argument("--agent", action="store_true", help="an agent's call: refused unless the allowance (quota set) covers it")
-    q = isub.add_parser("ensure", help="have N boxes up: power on the ones that are off, create what is missing inside the allowance, retry when no card is free, report what failed")
+    q = isub.add_parser("ensure", help="have N boxes up: power on the ones that are off, create what is missing inside the allowance the moment a listed card is free (preference order), wait when none is, report what failed")
     q.add_argument("--count", type=int, required=True)
     q.add_argument("--spec", required=True, help="a JSON file of the create request WITHOUT the card spec and data center (they come from --specs and --data-centers), or - for stdin")
     q.add_argument("--specs", help="card specs in order of preference, comma separated (default: CLOUDGPU_ENSURE_SPECS, else v-48g = 4090 48G)")
     q.add_argument("--data-centers", help="data centers in order, comma separated (default: CLOUDGPU_ENSURE_DATA_CENTERS, else westDC3,beijingDC2)")
     q.add_argument("--patience", type=float, default=600, help="seconds to keep trying when no card is in stock (default 600)")
+    q.add_argument("--poll", type=float, default=30, help="seconds between reads of the vendor's free-card page while waiting (default 30; the page asks for no more than one in half a minute)")
     q.add_argument("--yes", action="store_true", help="do it; without it the plan is printed and nothing changes")
     qs = sub.add_parser("quota", help="the allowance an agent may rent boxes inside: show (free), set (a person; records who and when)")
     qsub = qs.add_subparsers(dest="qcmd", required=True)

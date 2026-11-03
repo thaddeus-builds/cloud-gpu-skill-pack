@@ -145,5 +145,52 @@ def test_the_cli_ensure_names_instances_and_caps_a_wired_box_without_the_agent_f
             os.environ.pop("CLOUDGPU_STATE_DIR", None)
 
 
+def test_the_dry_run_shows_the_three_numbers_or_the_refusal_before_yes():
+    with _t.tmpdir() as d:
+        cloud = FakeCloud(instances=[Instance(id="pro-a", status="shutdown", billing="payg", gpu_spec="v-48g")])
+        rc, lines = cli_run(cloud, d, ["power-on", "--max-minutes", "21", "--budget-cny", "5", "pro-a"])
+        o = lines[0]
+        assert rc == 0 and o["dry_run"] is True and o["price_cny_per_hour"] == 3.0 and o["spent_today_cny"] == 0 and o["would_add_cny"] == 1.05 and o["budget_cny"] == 5 and "would_refuse" not in o
+        assert not any(c[0] == "power_on" for c in cloud.calls)
+        os.environ["CLOUDGPU_STATE_DIR"] = d
+        try:
+            with redirect_stdout(io.StringIO()):
+                assert cli.main(["ledger", "add", "--cny", "4.65", "--by", "yongshen", "--note", "outside the package"]) == 0
+        finally:
+            os.environ.pop("CLOUDGPU_STATE_DIR", None)
+        rc, lines = cli_run(cloud, d, ["power-on", "--max-minutes", "21", "--budget-cny", "5", "pro-a"])
+        assert rc == 0 and "4.65" in lines[0]["would_refuse"] and "5" in lines[0]["would_refuse"] and "refuse" in lines[0]["next"][0]
+
+
+def test_ledger_add_counts_money_spent_outside_the_package_and_only_today():
+    now = NOON
+    rows = [row("spend", None, now - 2 * H, cny=4.65), row("spend", None, quota.day_start(now) - H, cny=100.0)]
+    assert abs(quota.run_spend_today(rows, now) - 4.65) < 1e-6                     # yesterday's does not count
+    with _t.tmpdir() as d:
+        os.environ["CLOUDGPU_STATE_DIR"] = d
+        try:
+            for argv, want in ((["ledger", "add", "--cny", "0", "--by", "x"], 2), (["ledger", "add", "--cny", "nan", "--by", "x"], 2), (["ledger", "add", "--cny", "2.5", "--by", "x"], 0)):
+                with redirect_stdout(io.StringIO()):
+                    assert cli.main(argv) == want
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                assert cli.main(["ledger", "today"]) == 0
+            o = json.loads(buf.getvalue())
+            assert o["spent_today_cny"] == 2.5 and o["outside_the_package"][0]["actor"] == "x"
+        finally:
+            os.environ.pop("CLOUDGPU_STATE_DIR", None)
+
+
+def test_the_ensure_dry_run_says_the_cap_the_budget_and_where_it_would_create_if_the_power_on_is_refused():
+    with _t.tmpdir() as d:
+        allow(d, instances=3, cny=500)
+        cloud = FakeCloud(instances=[Instance(id="pro-a", status="shutdown", billing="payg", gpu_spec="v-48g")])
+        r = stew(d, cloud).ensure(1, TEMPLATE, specs=["v-48g"], centers=["westDC3", "beijingDC2"], yes=False, instances=["pro-a"], max_minutes=21, budget=5)
+        assert r["would_power_on"] == ["pro-a"] and "21" in r["would_guard"] and r["budget_checks"]["pro-a"]["would_add_cny"] == 1.05
+        assert [o["data_center"] for o in r["order"]] == ["westDC3", "beijingDC2"] and r["if_a_power_on_is_refused_for_no_stock"] and not any(c[0] in ("power_on", "create") for c in cloud.calls)
+        r2 = stew(d, cloud).ensure(1, TEMPLATE, specs=["v-48g"], centers=["westDC3"], yes=False, instances=["pro-a"], max_minutes=21, budget=0.5)
+        assert "would_refuse" in r2["budget_checks"]["pro-a"]
+
+
 if __name__ == "__main__":
     _t.main(globals())

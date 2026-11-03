@@ -301,6 +301,8 @@ openmax-cloudgpu instances ensure --count 1 --spec t.json --specs pro6000-p --da
   first**; when one cannot open ("no stock": on 2026-11-03 a free card in the zone did not open a stopped instance, which looks tied to its own machine), `ensure` creates in the order asked for in the same round. An id the account does not
   list is reported in `not_in_account` and in `next`.
 - **One line out.** `power-on` prints one JSON line: `done`, `id`, `started_at`, `price_cny_per_hour`, `auto_off_at`, `max_minutes`, `guard`, and with a budget `spent_today_cny`, `would_add_cny`, `budget_cny`. `ensure` gives the same per box in `runs`.
+- **The dry run shows the numbers (0.20.1).** `power-on ... --budget-cny X` without `--yes` prints `spent_today_cny`, `would_add_cny`, `budget_cny` or `would_refuse` with the reason; `ensure` without `--yes` adds `would_guard`, `budget_checks` (per box to power on) and the `order` of creates it would fall back to when a power-on is refused for no stock.
+- **Money spent outside the package.** `openmax-cloudgpu ledger add --cny 4.65 --by NAME --note "..."` writes a `spend` line that `--budget-cny` counts for today (a person records it; the ledger knows only what the package powered). `ledger today` shows what the gate counts.
 - The guard of a box this agent did not make (a wired or named one) is started without `--agent`, which would refuse it; switching a box off is the safe direction.
 
 ### Passes: the base, and the warning before one ends (0.16.0)

@@ -62,9 +62,9 @@ autodl.art's own workflow catalog, peak / off-peak, ¥ per second of video.
    `proof` only when it listens on loopback (otherwise anyone could ask it for HMAC(token, nonce) and guess the token offline), only for a nonce of 16 to 64 lowercase hex characters, and
    at most 30 times a minute; a client refuses an `http://` base to anything but this machine, so such a box is reached by its https address.
 
-## What a box runs, and how each is started after a boot (0.21.0)
+## What a box runs, and how each is started after a boot (0.22.0)
 
-A box needs three processes. After a power-on only the first used to come up by itself; from 0.21.0 `start.sh` starts all three, in this order:
+A box needs three processes. After a power-on only the first used to come up by itself; from 0.22.0 `start.sh` starts all three, in this order:
 
 | process | port | what it is | up means | after a boot |
 |---|---|---|---|---|
@@ -102,7 +102,7 @@ of these set in its environment, into `services.json` (0600), so the power-on ho
 **How to check each process.**
 
 - From your machine: `python3 -m cloudgpu status` prints `services` = `{adapter, comfy, voxcpm}`, each `{state, reason}` with `state` one of `up`, `starting`, `down`, `absent` (not installed here: VoxCPM is optional) or
-  `unknown` (the adapter does not answer, or is older than 0.21.0), and puts what to do in `next`. The adapter's `/health` (no token) carries the same under `services` (below). `ready` still means ComfyUI answers; a VoxCPM
+  `unknown` (the adapter does not answer, or is older than 0.22.0), and puts what to do in `next`. The adapter's `/health` (no token) carries the same under `services` (below). `ready` still means ComfyUI answers; a VoxCPM
   that is down is a line in `next` and does not change `ready` (an H3 take does not need it).
 - On the box: `python3 ~/h3host/services.py status [--json]` (one line per service, read only), and the logs above. `sh ~/h3host/start.sh` again starts whatever is down and nothing else.
 - By hand: `curl -s 127.0.0.1:6009/health`, `curl -s 127.0.0.1:6006/system_stats`, `curl -s 127.0.0.1:8190/voxcpm/v1/health`.
@@ -549,7 +549,7 @@ starts by itself), wait until the account says `running`, read the SSH door and 
 
 | step | automatic? | why |
 |---|---|---|
-| rent from an image or snapshot, start the adapter, ComfyUI and (if installed) VoxCPM at boot | yes, if the image already has the adapter and `~/h3host/start.sh` from 0.21.0 | `start_command` on create; `start.sh` starts what is down (section "What a box runs") |
+| rent from an image or snapshot, start the adapter, ComfyUI and (if installed) VoxCPM at boot | yes, if the image already has the adapter and `~/h3host/start.sh` from 0.22.0 | `start_command` on create; `start.sh` starts what is down (section "What a box runs") |
 | wait for `running`, read SSH door, price | yes | the account's status and snapshot (never a password) |
 | put a key on the box, run `bundle` + `install.sh` | **no** | a new box has only the password the API deliberately does not return; a key must already be in the image |
 | the adapter token (`CLOUDGPU_TOKEN`) | **no** | a secret: a person pipes it |

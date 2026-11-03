@@ -16,7 +16,7 @@ calls a client of that API already makes, so a client needs a base URL and a tok
                                                                 values of minimax_h3_image_audio_locked this box serves RIGHT NOW (["official","addguide"], ["official","addguide","audiodrive"], or [] when ComfyUI has no usable lock node or
                                                                 has not answered yet; an adapter older than 0.20.0 has no such key and refuses the workflow); `audio_lock_detail` says per lock whether its node
                                                                 was found in ComfyUI's /object_info, where it comes from (module, pack, commit) and, for audiodrive, whether the operator switched it on. `proof` lets a client that holds the token tell
-                                                                `services` (0.21.0) says per service ("comfy", "voxcpm") {"state": "up"|"starting"|"down"|"absent", "reason", "port", "log" [, "loaded" (voxcpm: its model is in memory)]}:
+                                                                `services` (0.22.0) says per service ("comfy", "voxcpm") {"state": "up"|"starting"|"down"|"absent", "reason", "port", "log" [, "loaded" (voxcpm: its model is in memory)]}:
                                                                 `comfy` is the same fact as the `comfy` key with the reason a person can act on; "absent" = not installed on this box (VoxCPM is optional). An adapter older than 0.21.0 has no such key.
                                                                 `proof` lets a client that holds the token tell
                                                                 this adapter from another process holding the tunnel's port: it is answered only when the
@@ -134,7 +134,7 @@ GRACE_S = 300                      # a finished take counts as busy this long un
 FFMPEG_TIMEOUT_S = 600
 SOCKET_TIMEOUT_S = 60              # a client that stalls this long loses its connection and its handler thread
 COMFY_CACHE_S, CARD_RETRY_S = 2, 60
-SERVICES_FILE = "services.state.json"       # written by onbox/services.py (0.21.0): what the start of ComfyUI and VoxCPM saw; /health says it
+SERVICES_FILE = "services.state.json"       # written by onbox/services.py (0.22.0): what the start of ComfyUI and VoxCPM saw; /health says it
 SERVICES_CACHE_S = 3
 VOXCPM_PORT = 8190
 FREE_AFTER_TAKE = True             # after a take that leaves nothing waiting, ComfyUI is asked to unload its models (the next take loads them again)
@@ -768,7 +768,7 @@ def lock_entry(lock: str, infos: dict, checked: bool, allowed: bool, root: Path)
     return e
 
 
-# ---- the other services of the box (0.21.0) --------------------------------------------------------------------------
+# ---- the other services of the box (0.22.0) --------------------------------------------------------------------------
 
 def container_start():
     """When this box was powered on, from its first process; None where /proc does not say (a copy of onbox/services.py `container_start`)."""

@@ -1,4 +1,4 @@
-"""The services a box starts after a boot (cloudgpu/onbox/services.py, 0.21.0): ComfyUI, then VoxCPM when it is installed; idempotent, in order, VoxCPM's weights never loaded,
+"""The services a box starts after a boot (cloudgpu/onbox/services.py, 0.22.0): ComfyUI, then VoxCPM when it is installed; idempotent, in order, VoxCPM's weights never loaded,
 logs under logs/, and what /health and `status` say of each. Real processes stand in for the services (a fake ComfyUI that takes a while to bind, a fake VoxCPM that records every call);
 nothing needs a GPU, a box or a network beyond 127.0.0.1."""
 
@@ -593,7 +593,7 @@ def test_the_status_lists_each_process_with_its_state_and_reason_for_new_and_old
     v = status_mod.services_view(new, True, False)
     assert v["adapter"]["state"] == "up" and v["comfy"]["state"] == "starting" and v["voxcpm"]["state"] == "absent" and v["voxcpm"]["reason"].startswith("VoxCPM is not installed"), v
     old = status_mod.services_view({"ok": True, "comfy": False}, True, False)
-    assert old["comfy"]["state"] == "down" and "older than 0.21.0" in old["comfy"]["reason"] and old["voxcpm"]["state"] == "unknown", old
+    assert old["comfy"]["state"] == "down" and "older than 0.22.0" in old["comfy"]["reason"] and old["voxcpm"]["state"] == "unknown", old
     assert status_mod.services_view({"ok": True, "comfy": True}, True, False)["comfy"]["state"] == "up"
     off = status_mod.services_view(None, True, False)
     assert off["adapter"]["state"] == "down" and off["comfy"]["state"] == "unknown" and off["voxcpm"]["state"] == "unknown"
@@ -688,7 +688,7 @@ def test_the_bundle_carries_services_py_and_an_install_without_it_still_works_as
     assert 'if [ -f "$HERE/services.py" ]' in text, "an old bundle without services.py installs as in 0.20.0"
 
 
-# ---- what the review found (0.21.0) ------------------------------------------------------------------------------------------
+# ---- what the review found (0.22.0) ------------------------------------------------------------------------------------------
 
 def test_a_launcher_that_starts_the_service_in_the_background_and_returns_is_not_run_again_while_the_service_loads():
     with world(vox=True) as w:

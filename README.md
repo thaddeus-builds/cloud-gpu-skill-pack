@@ -32,7 +32,7 @@ box.ensure_up()                     # tunnel by key, power on if off (by design,
 api, token = box.api_base(), box.token()
 ```
 
-A box runs three processes: the adapter (:6009), ComfyUI (:6006, 2 to 3 minutes to answer) and, when installed, the VoxCPM voice service (:8190, its model loads on the first voice). From 0.21.0 the box's
+A box runs three processes: the adapter (:6009), ComfyUI (:6006, 2 to 3 minutes to answer) and, when installed, the VoxCPM voice service (:8190, its model loads on the first voice). From 0.22.0 the box's
 `start.sh` starts all three after a boot, in that order, only what is down (VoxCPM's weights are never loaded by the start). Check each with `python3 -m cloudgpu status` (`services`: up / starting / down / absent, with the reason),
 the adapter's `/health` (`comfy`, `services`) or, on the box, `python3 ~/h3host/services.py status`; logs are `~/h3host/logs/comfyui.log`, `voxcpm.log`, `services.log`. Details: docs/cloud-gpu.md, "What a box runs".
 

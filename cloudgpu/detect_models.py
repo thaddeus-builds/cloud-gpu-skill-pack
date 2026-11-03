@@ -152,7 +152,7 @@ def git_head(folder: Path) -> str | None:
         except OSError:
             val = next((ln.split()[0] for ln in (git / "packed-refs").read_text().splitlines() if ln.endswith(" " + ref)), "")
         return val if re.fullmatch(r"[0-9a-f]{40}", val) else None
-    except (OSError, UnicodeDecodeError, IndexError):
+    except (OSError, ValueError, IndexError):          # ValueError: an undecodable file or a NUL in a path
         return None
 
 
@@ -201,7 +201,10 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--nodes-only", action="store_true", help="report the audio-lock node packs only (no H3 models, no GPU query)")
     ap.add_argument("--text", action="store_true", help="with --nodes-only: the lines install.sh shows instead of JSON")
     a = ap.parse_args(argv)
-    nodes = find_nodes(Path(a.comfy_root))
+    try:
+        nodes = find_nodes(Path(a.comfy_root))
+    except Exception:                      # a report about a pack never stops the detection of the models or the voice
+        nodes = {}
     if a.nodes_only:
         print(nodes_text(nodes) if a.text else json.dumps({"nodes": nodes}, indent=1))
         return 0

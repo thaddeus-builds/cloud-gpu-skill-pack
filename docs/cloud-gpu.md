@@ -83,7 +83,7 @@ AUTODL_DEV_TOKEN=…          the autodl backend: the account's developer token 
 The older `H3HOST_<NAME>` names are read second, and only when the new name is absent: a key that is present wins even when empty (`CLOUDGPU_AUTOOFF=` is off, it does not fall through
 to `H3HOST_AUTOOFF`). Values are stripped of surrounding whitespace (a token read from a file keeps no newline). A consumer loads its own `.env` into the environment, or passes a
 mapping: `Box(env)`; `python3 -m cloudgpu status --env-file FILE` and `bench` read a file and warn when other users can read it (chmod 600).
-On the box, `start.sh` also takes `CLOUDGPU_BIND` (default 127.0.0.1), `CLOUDGPU_PUBLIC_BASE`, `CLOUDGPU_ALLOW_NODE_VRGDG` (empty or unset is off, the default; `1`, `true`, `yes` or `on` is on: the owner's switch for the third-party audiodrive lock, below), and leaves an adapter that has a take on it running (it restarts only at `busy` 0). `install.sh` writes the value it was run with into `start.sh` as the default, so the decision is made at each install: a reinstall without the variable is off again.
+On the box, `start.sh` also takes `CLOUDGPU_BIND` (default 127.0.0.1), `CLOUDGPU_PUBLIC_BASE`, `CLOUDGPU_ALLOW_NODE_VRGDG` (empty or unset is off, the default; `1`, `true`, `yes` or `on` is on: the owner's switch for the third-party audiodrive lock, below), and leaves an adapter that has a take on it running (it restarts only at `busy` 0). `install.sh` writes the value it was run with (letters and digits only; anything else stops the install) into `start.sh` as the default, so the decision is made at each install and **lasts across reboots and power-ons**, which run `start.sh` with no environment; a reinstall without the variable is off again. A value set when `start.sh` runs wins over the default, `0` or empty included, and the adapter writes `audio lock: audiodrive is ENABLED ...` to its log at each start it is on.
 
 ## Use it from code
 
@@ -378,8 +378,7 @@ still starting and then found without its node is `FAILED` with the same words, 
 | `lock_unknown` | any other value of `lock` |
 | `lock_wrong_workflow` | `lock` sent to a workflow that does not lock the audio (the unlocked one, Mode A, text to video, the voice): the caller asked for an anchored audio and would get an unanchored one |
 
-**What `/health` says** (no token). The nodes are looked for by name in ComfyUI's `/object_info` when the adapter starts and again when `/health` or a take asks (at most 30 s old; asked afresh for every take of a lock, and again before a refusal, so a refusal is
-never stale). While ComfyUI is down or silent nothing is known and no lock is offered.
+**What `/health` says** (no token). The nodes are looked for by name in ComfyUI's `/object_info` when the adapter starts and again when `/health` asks (at most 30 s old); a take of a lock reads them afresh twice, when it is accepted and when it runs, so neither a refusal nor an acceptance is stale. While ComfyUI is down or silent nothing is known and no lock is offered.
 ```
 "audio_lock": ["addguide", "audiodrive"],         the lock values served right now: [] when none is
 "audio_lock_detail": {
@@ -390,7 +389,7 @@ never stale). While ComfyUI is down or silent nothing is known and no lock is of
                  "pack": "comfyui-vrgamedevgirl", "commit": "<40 hex>"|null, "version": "<pyproject version>"|null,
                  "licence": "VRGameDevGirl Community and Commercial License v1.0", "problem": null}}
 ```
-`present` is null when nothing is known; `problem` is the coded words a take of that lock would get (null when it can run); `status` of audiodrive is `audiodrive (third-party, licence-restricted, off: CLOUDGPU_ALLOW_NODE_VRGDG is not set)` until the operator switches it on.
+On a bind other than loopback (`CLOUDGPU_BIND`, a vendor's public port) `commit` and `version` are null: `/health` answers anyone there. `present` is null when nothing is known; `problem` is the coded words a take of that lock would get (null when it can run); `status` of audiodrive is `audiodrive (third-party, licence-restricted, off: CLOUDGPU_ALLOW_NODE_VRGDG is not set)` until the operator switches it on.
 `pack` is the custom-node folder ComfyUI reports for the node (`python_module`); `commit` is read from that folder's `.git` (no git is run), `version` from its `pyproject.toml`; both are null when they cannot be read. `python3 -m cloudgpu status` shows `box.audio_lock` (null: an adapter older than 0.20.0).
 `install.sh` and `detect_models.py` (`--nodes-only`) report whether the pack is in `custom_nodes` and its commit; they never install or fetch it.
 

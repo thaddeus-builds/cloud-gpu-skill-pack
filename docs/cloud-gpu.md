@@ -38,7 +38,7 @@ autodl.art's own workflow catalog, peak / off-peak, ¥ per second of video.
 ## Set up a box
 
 1. Rent an instance from an image that already carries H3 in ComfyUI (a shared model pool on the vendor's side means no download); note its SSH line.
-2. `python3 -m cloudgpu bundle` makes `cloudgpu-box.tgz` (the adapter, the detector, `install.sh`, `tunnel.sh`, the two verified model presets). `scp` it to the box,
+2. `python3 -m cloudgpu bundle` makes `cloudgpu-box.tgz` (the adapter, the detector, `install.sh`, `tunnel.sh`, `services.py`, the two verified model presets). `scp` it to the box,
    `tar xzf` it, and run `sh install.sh auto 6009 < token-file` (a 24+ character secret). `auto` runs `detect_models.py`, which reads the image's files and picks, by
    exact name, the models for this card (the nvfp4 text encoder needs a Blackwell GPU, every other card takes the int8 one); it names what is missing and writes
    nothing then. install.sh needs only a python and curl, works in `$CLOUDGPU_DIR` (default `~/h3host`, the folder name the first boxes got), and installs a systemd unit
@@ -61,6 +61,59 @@ autodl.art's own workflow catalog, peak / off-peak, ¥ per second of video.
    (`bench` takes the token the same way). A request to this machine never goes through `http_proxy`/`HTTPS_PROXY`. **A widened bind (`CLOUDGPU_BIND`) has no proof**: the adapter answers
    `proof` only when it listens on loopback (otherwise anyone could ask it for HMAC(token, nonce) and guess the token offline), only for a nonce of 16 to 64 lowercase hex characters, and
    at most 30 times a minute; a client refuses an `http://` base to anything but this machine, so such a box is reached by its https address.
+
+## What a box runs, and how each is started after a boot (0.21.0)
+
+A box needs three processes. After a power-on only the first used to come up by itself; from 0.21.0 `start.sh` starts all three, in this order:
+
+| process | port | what it is | up means | after a boot |
+|---|---|---|---|---|
+| adapter | 6009 | this package's `server.py` (token-checked) | `GET /health` answers | `start.sh` starts it, as before |
+| `comfy` | 6006 | ComfyUI, the pictures/video models (2 to 3 minutes before it answers) | `GET /system_stats` answers (the adapter's `comfy` key) | `services.py` starts it when it is down |
+| `voxcpm` | 8190 | the VoxCPM voice service (adcut's `docs/voxcpm.md`; its code is not in this package) | an HTTP answer below 500 from `GET /voxcpm/v1/health`, or a connection that is accepted and not answered in time (1 s for the adapter, 3 s for `services.py`: it is working on a voice, so `up`, with that reason) | `services.py` starts it when it is installed and down, after ComfyUI answers |
+
+`start.sh` runs `onbox/services.py up --detach` (copied to the adapter's folder by `install.sh`; `bundle` carries it) and returns at once, so the vendor's power-on hook is not held for the ComfyUI warm-up.
+The background run does, for `comfy` and then `voxcpm`:
+
+- **Looks first.** A service that answers is left alone. One that does not answer but whose process is running (started by hand, by the vendor's panel or by an earlier run; found by its command line) is
+  waited for, never started a second time (a launcher that starts the service in the background and returns is recognised by the process group it left behind, so the service is not started again while it loads). A lock file keeps two starts at the same time (the vendor's hook and systemd both run `start.sh`) from racing. Nothing is ever killed or restarted.
+- **ComfyUI** is run as `python main.py --listen 127.0.0.1 --port 6006` in its folder, after `nvidia-smi` sees a GPU (waits up to 90 s; a box without `nvidia-smi` is not checked). **VoxCPM** is
+  started only when it is installed here (a launcher or `CLOUDGPU_VOXCPM_CMD`) and only after ComfyUI answers or its wait (420 s) ends; a ComfyUI that failed does not stop VoxCPM.
+- **VoxCPM's weights are not loaded.** The service loads its model when the first voice is asked for (about 6 GB; VoxCPM2 and H3's roughly 46 GB cannot sit together in 48 GB, which is why the Make
+  orders them, adcut's `docs/voxcpm.md`). The only call `services.py` or the adapter ever makes to it is `GET /voxcpm/v1/health`.
+- **Logs** are under the adapter's folder, always at the same names: `logs/comfyui.log`, `logs/voxcpm.log` (what the service printed, appended; the old log is kept as `.1` past 20 MB, mode 0600) and `logs/services.log`
+  (this script). `services.state.json` holds what the last start saw. No token or other secret is written to any of them. The services' environment is the start's own minus `CLOUDGPU_*`, `H3HOST_*` and `AUTODL_*` variables ending in `TOKEN` (the adapter's and the account's tokens); any other variable (a model hub's `HF_TOKEN`, say) is passed on as it is.
+
+**Where things are** (nothing is fixed to one image; each setting is the environment of the run, then `services.json` in the adapter's folder, then what is looked for). `install.sh` writes the folder it was run with, and any
+of these set in its environment, into `services.json` (0600), so the power-on hook, which runs `start.sh` with almost no environment, finds them.
+
+| setting | default and how it is looked for |
+|---|---|
+| `CLOUDGPU_COMFY_ROOT` | the folder `install.sh` was run with (`~/ComfyUI`); if that has no `main.py`, the first folder with a `main.py` and a `comfy/` or `custom_nodes/` among `<base>/ComfyUI` and every folder one level under the bases `~`, `/root/autodl-tmp`, `/root/autodl-fs`, `/workspace`, `/opt` |
+| `CLOUDGPU_COMFY_PYTHON` | the first of `ROOT/venv`, `ROOT/.venv`, the Python `install.sh` ran with, the one running `services.py`, `python3`, `~/miniconda3`, `/opt/conda` that can import `torch`; a configured one is used as it is |
+| `CLOUDGPU_COMFY_PORT` | 6006. Read at install only, and the install is authoritative: `start.sh` tells the adapter the port, and a port from an earlier install is dropped when the next one does not give it |
+| `CLOUDGPU_COMFY_ARGS`, `CLOUDGPU_COMFY_CMD`, `CLOUDGPU_COMFY_MATCH` | extra arguments after `--listen 127.0.0.1 --port N`; or the whole command instead (split like a shell would, run without one); a regex on a process command line that recognises a copy already running (default `main.py ... --port N`, or the command itself). The command lines are written to the service logs: put no secret in them |
+| `CLOUDGPU_VOXCPM_CMD`, `CLOUDGPU_VOXCPM_DIR` | the command (run in the dir) that starts the service; else a launcher named `start.sh`, `serve.sh`, `start_service.sh`, `run_service.sh` or `voxcpm_service.sh` in that dir or in a folder with "voxcpm" in its name under the adapter's folder or a base. **This launcher convention is a guess: the VoxCPM service is not in this package. If yours is elsewhere, set the command once at install** |
+| `CLOUDGPU_VOXCPM_PORT`, `CLOUDGPU_VOXCPM_MATCH` | 8190; a regex on a process command line that recognises a copy that already runs (default: the launcher's path or the command itself; set it when the service's own command line differs, e.g. `python server.py`, so a copy you started by hand is not doubled). A bad regex is ignored and said |
+| `CLOUDGPU_COMFY_WAIT_S`, `CLOUDGPU_VOXCPM_WAIT_S`, `CLOUDGPU_GPU_WAIT_S` | 420, 120, 90 |
+| `CLOUDGPU_SERVICES_AUTOSTART=0` | start nothing; `status` still reports |
+| `CLOUDGPU_SERVICES_SEARCH` | the bases above, as a path list, instead of the defaults |
+
+**How to check each process.**
+
+- From your machine: `python3 -m cloudgpu status` prints `services` = `{adapter, comfy, voxcpm}`, each `{state, reason}` with `state` one of `up`, `starting`, `down`, `absent` (not installed here: VoxCPM is optional) or
+  `unknown` (the adapter does not answer, or is older than 0.21.0), and puts what to do in `next`. The adapter's `/health` (no token) carries the same under `services` (below). `ready` still means ComfyUI answers; a VoxCPM
+  that is down is a line in `next` and does not change `ready` (an H3 take does not need it).
+- On the box: `python3 ~/h3host/services.py status [--json]` (one line per service, read only), and the logs above. `sh ~/h3host/start.sh` again starts whatever is down and nothing else.
+- By hand: `curl -s 127.0.0.1:6009/health`, `curl -s 127.0.0.1:6006/system_stats`, `curl -s 127.0.0.1:8190/voxcpm/v1/health`.
+
+**`/health` and a down ComfyUI (contract).** `comfy: false` means ComfyUI does not answer; clients can rely on it. `services.comfy.state` says why in one word: `starting` (2 to 3 minutes after a boot: wait), `down` (with a
+`reason`: the process exited with a code, no GPU, no ComfyUI folder or no Python with torch found, autostart off, no start recorded) or `absent`. `services.voxcpm` is the same, plus `loaded` (its model is in memory, or null when it
+does not say). `last_line` (the log's last line when a start failed) is told only on a loopback bind. A take sent while ComfyUI is down is accepted and waits for it up to 10 minutes (a cold box is still starting); if it never comes, the
+take is `FAILED` with `ComfyUI is not answering after 600 s: <state>, <reason>` (it was only "ComfyUI is not answering" before). `Box.ensure_up()` adds the same reason to its timeout.
+
+**Not done.** Nothing watches the services afterwards: one that dies mid-session stays down until `start.sh` is run again (a person, or the next power-on). The VoxCPM launcher is found by convention (above). The port of ComfyUI can be
+changed only at install. No real box was run for this change: the tests start a fake ComfyUI and a fake VoxCPM.
 
 ## Settings (environment; names only, a value is never printed)
 
@@ -496,12 +549,12 @@ starts by itself), wait until the account says `running`, read the SSH door and 
 
 | step | automatic? | why |
 |---|---|---|
-| rent from an image or snapshot, start the adapter at boot | yes, if the image already has the adapter and `~/h3host/start.sh` | `start_command` on create |
+| rent from an image or snapshot, start the adapter, ComfyUI and (if installed) VoxCPM at boot | yes, if the image already has the adapter and `~/h3host/start.sh` from 0.21.0 | `start_command` on create; `start.sh` starts what is down (section "What a box runs") |
 | wait for `running`, read SSH door, price | yes | the account's status and snapshot (never a password) |
 | put a key on the box, run `bundle` + `install.sh` | **no** | a new box has only the password the API deliberately does not return; a key must already be in the image |
 | the adapter token (`CLOUDGPU_TOKEN`) | **no** | a secret: a person pipes it |
 | wire it to the settings (`CLOUDGPU_<NAME>_INSTANCE`, `_SSH`, `_BASE`, `_TOKEN`) | **no** | the settings are the operator's |
-| the voice service (VoxCPM, port 8190) | **no** | adcut's `docs/voxcpm.md`; not copied here |
+| install the voice service (VoxCPM, port 8190) | **no** | adcut's `docs/voxcpm.md`; not copied here (once installed, `start.sh` starts it at boot) |
 | `python3 -m cloudgpu status` says `ready`, one measured take, a price confirmed | **no** | a paid take and a price are a person's |
 
 The way to make the first row cover the rest: set one box up once by hand, put the restricted key in its `authorized_keys`, install the adapter and the voice service, save it as a private image,

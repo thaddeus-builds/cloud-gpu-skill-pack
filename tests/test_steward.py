@@ -132,12 +132,12 @@ def test_inside_the_allowance_the_agent_creates_and_the_ledger_has_spec_price_an
     with _t.tmpdir() as d:
         allow(d, instances=2, cny=100)
         cloud = FakeCloud(stock={("v-48g", "westDC3"): 5})
-        s = stew(d, cloud, env={"CLOUDGPU_ACTOR": "emma-agent"})
+        s = stew(d, cloud, env={"CLOUDGPU_ACTOR": "client-a-agent"})
         a, b = s.create(spec()), s.create(spec())
         assert a["created"] == "pro-new1" and a["price_cny_per_hour"] == 3.0 and a["price_source"] == "snapshot"
         rows = [r for r in s.ledger.rows() if r["action"] == "create"]
         assert [(r["instance"], r["spec"], r["data_center"], r["price_cny_per_hour"], r["actor"], r["agent"]) for r in rows] == [
-            ("pro-new1", "v-48g", "westDC3", 3.0, "emma-agent", True), ("pro-new2", "v-48g", "westDC3", 3.0, "emma-agent", True)]
+            ("pro-new1", "v-48g", "westDC3", 3.0, "client-a-agent", True), ("pro-new2", "v-48g", "westDC3", 3.0, "client-a-agent", True)]
         with _t.raises("over_quota") as c:
             s.create(spec())                                                                           # the third: two at once is the allowance
         assert "2 instance" in c.err.message and cloud.n == 2
